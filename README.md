@@ -5,7 +5,7 @@
 [![Neo4j](https://img.shields.io/badge/Neo4j-5.x+-008CC1?logo=neo4j&logoColor=white)](https://neo4j.com/)
 [![Claude](https://img.shields.io/badge/Claude-Skills-D97706?logo=anthropic&logoColor=white)](https://claude.ai/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Models](https://img.shields.io/badge/Reference_Models-25-blue)](docs/models.md)
+[![Models](https://img.shields.io/badge/Reference_Models-25-blue)](#available-reference-models)
 
 ---
 
@@ -48,7 +48,7 @@ Pick a reference model → Customize in visual editor → Generate test data →
 
 | Requirement | Details |
 |---|---|
-| **Claude.ai account** | Pro, Team, or Enterprise plan with Skills enabled |
+| **Claude.ai or Claude Desktop** | Pro, Team, or Enterprise plan with Skills enabled. Works on both [claude.ai](https://claude.ai) and the [Claude Desktop app](https://claude.ai/download). |
 | **Python 3.9+** | For data generation and ingestion (runs inside Claude's sandbox) |
 | **Neo4j instance** | Optional — only needed for Stage 6 (ingestion). [AuraDB Free](https://neo4j.com/cloud/aura-free/) works. |
 
@@ -62,7 +62,7 @@ For direct database ingestion from Claude, connect the [Neo4j MCP tools](https:/
 
 ### Step 1: Download the Skills
 
-Download all 5 `.skill` files from the [Releases](../../releases) page:
+Download all 5 `.skill` files from the [`skills/`](skills/) directory:
 
 | File | Size | Purpose |
 |---|---|---|
@@ -74,10 +74,17 @@ Download all 5 `.skill` files from the [Releases](../../releases) page:
 
 ### Step 2: Install in Claude
 
-1. Open [Claude.ai](https://claude.ai)
+The skills work on both **Claude.ai (web)** and the **Claude Desktop app**.
+
+**Claude.ai (Web):**
+1. Open [claude.ai](https://claude.ai)
 2. Go to **Settings** → **Profile** → **Claude Skills**
 3. Click **Add Skill** and upload each `.skill` file
-4. Verify all 5 skills appear in your skills list
+
+**Claude Desktop App:**
+1. Open the [Claude Desktop app](https://claude.ai/download)
+2. Go to **Settings** → **Customize** → **Claude Skills**
+3. Click **Add Skill** and upload each `.skill` file
 
 ### Step 3: Verify Installation
 
@@ -167,13 +174,20 @@ An interactive visual editor appears as an artifact with your chosen reference m
 
 Add, remove, or edit nodes, relationships, and properties to match your exact needs.
 
-### Stage 4 — Export Schema
+### Stage 4 — Export Your Schema
 
-Click **Export** → **Copy JSON** → Paste into chat. Or simply tell Claude "looks good, generate data".
+When you're happy with the schema:
+
+1. Click the **Export** button in the editor
+2. Select the **Arrows JSON** tab
+3. Click **Copy JSON** (copies to your clipboard)
+4. **Paste it into the chat**
+
+> **Tip:** If you didn't change anything from the reference model, you can simply tell Claude *"looks good, generate data"* — it will use the reference model schema directly without needing a paste.
 
 ### Stage 5 — Generate Test Data
 
-Claude generates realistic, context-aware fake data as CSV files. You choose the scale:
+Claude generates realistic, context-aware fake data as CSV files:
 
 | Scale | Records | Best For |
 |---|---|---|
@@ -182,7 +196,7 @@ Claude generates realistic, context-aware fake data as CSV files. You choose the
 | Large | ~10,000 | Load testing, performance |
 | Custom | You specify | Specific requirements |
 
-**Context-aware generation** — the generator knows what kind of data each node expects:
+**Context-aware generation examples:**
 
 | Node Label | Property | Generated Value |
 |---|---|---|
@@ -193,7 +207,7 @@ Claude generates realistic, context-aware fake data as CSV files. You choose the
 | `ComputeInstance` | `hostname` | "web-prod-03.internal" |
 | `CVE` | `cveId` | "CVE-2024-31205" |
 | `Gene` | `symbol` | "TP53", "BRCA1", "EGFR" |
-| `Patent` | `title` | "Selective inhibitor of BACE1" |
+| `Machine` | `name` | "AssemblyMachine7" |
 
 ### Stage 6 — Load into Neo4j
 
@@ -272,9 +286,9 @@ python ingest_data.py ./graph_data \
 You:    "Start from the insurance claims fraud model"
 Claude: [Loads editor with Claimant, Claim, MedicalProfessional, Vehicle]
 
-You:    [Adds a Policy node, adds HAS_POLICY relationship]
+You:    [Adds a Policy node, customizes properties]
 You:    "Generate 1000 records"
-Claude: [Generates CSVs with realistic insurance data]
+Claude: [Generates CSVs with proper claim IDs, "Dr." prefixed names, VINs]
 
 You:    "Load it into my Neo4j database"
 Claude: [Runs ingestion via MCP or provides script]
@@ -287,7 +301,7 @@ You:    "I need a patient journey model for a hospital system"
 Claude: [Loads Patient, Encounter, Observation, Drug, Condition,
          Provider, Speciality, Organisation + NEXT chain]
 
-You:    "Add a CareTeam node connected to Encounter"
+You:    "Add a CareTeam node connected to Encounter via ASSIGNED_TO"
 You:    [Exports JSON and pastes it]
 
 You:    "Generate a large dataset — 10,000 patients"
@@ -314,16 +328,15 @@ Claude: [Writes the path-finding query]
 You:    "Show me the transaction base model"
 Claude: [Loads the full 19-node banking schema]
 
-You:    [Explores schema, clicks Export → Cypher tab → Copy]
+You:    [Clicks Export → Cypher tab → Copy]
 You:    [Pastes Cypher directly into Neo4j Browser]
 ```
 
-### Workflow 5: Custom Schema (No Reference Model)
+### Workflow 5: Custom Schema from Scratch
 
 ```
 You:    "Design a graph schema for a movie recommendation system"
 Claude: [Creates a custom schema from scratch using the editor]
-        [No reference model needed — direct schema design]
 ```
 
 ---
@@ -337,52 +350,41 @@ neo4j-graph-schema-toolkit/
 ├── LICENSE
 │
 ├── skills/
-│   ├── graph-schema-editor.skill
-│   ├── graph-reference-models.skill
-│   ├── graph-schema-from-reference.skill
-│   ├── graph-data-generator.skill
-│   └── graph-neo4j-ingestion.skill
+│   ├── graph-schema-editor.skill          ← Interactive visual editor (JSX)
+│   ├── graph-reference-models.skill       ← 25 reference model JSONs
+│   ├── graph-schema-from-reference.skill  ← Pipeline orchestrator
+│   ├── graph-data-generator.skill         ← Context-aware Faker generator
+│   └── graph-neo4j-ingestion.skill        ← Neo4j loader (MCP + Python)
 │
 └── src/
     ├── graph-schema-editor/
     │   ├── SKILL.md
-    │   └── assets/
-    │       └── graph-editor-template.jsx     # Self-contained React component
+    │   └── assets/graph-editor-template.jsx
     │
     ├── graph-reference-models/
     │   ├── SKILL.md
-    │   ├── scripts/
-    │   │   └── inject_model.py               # Injects model into editor template
-    │   └── references/
-    │       ├── model-index.json              # Catalog of all 25 models
-    │       ├── transaction-base-model.json
-    │       ├── claims-fraud.json
-    │       ├── patient-journey.json
-    │       └── ... (25 JSON files)
+    │   ├── scripts/inject_model.py
+    │   └── references/               ← 25 JSON model files + index
     │
     ├── graph-schema-from-reference/
-    │   ├── SKILL.md                          # Pipeline orchestrator (Stages 1-6)
-    │   ├── scripts/
-    │   │   └── inject_model.py
-    │   └── references/
-    │       └── ... (25 JSON files)
+    │   ├── SKILL.md                   ← Pipeline orchestrator (Stages 1-6)
+    │   ├── scripts/inject_model.py
+    │   └── references/               ← 25 JSON model files + index
     │
     ├── graph-data-generator/
     │   ├── SKILL.md
-    │   └── assets/
-    │       └── generate_data.py              # Context-aware Faker generator
+    │   └── assets/generate_data.py
     │
     └── graph-neo4j-ingestion/
         ├── SKILL.md
-        └── assets/
-            └── ingest_data.py                # Neo4j Python driver loader
+        └── assets/ingest_data.py
 ```
 
 ---
 
 ## Adding Custom Models
 
-You can add your own reference models by creating a JSON file:
+Create a JSON file following the arrows.app format:
 
 ```json
 {
@@ -418,7 +420,7 @@ You can add your own reference models by creating a JSON file:
 
 Place it in the `references/` folder and update `model-index.json`.
 
-To add context-aware data generation for your custom nodes, add entries to `CONTEXT_GENERATORS` in `generate_data.py`:
+To add context-aware data generation, add entries to `CONTEXT_GENERATORS` in `generate_data.py`:
 
 ```python
 CONTEXT_GENERATORS = {
@@ -438,7 +440,7 @@ The editor uses `document.execCommand('copy')` which works in Claude's artifact 
 
 ### Claude Asks for Schema After "Generate Data"
 
-If you customized the schema, you need to export the JSON and paste it into the chat. If you didn't change anything, say "use the reference model as-is" or "looks good, generate data".
+If you customized the schema, you need to export the JSON and paste it into the chat. If you didn't change anything, say *"use the reference model as-is"*.
 
 ### Package Installation Fails
 
@@ -446,20 +448,17 @@ The data generator uses a Python virtual environment. If `faker` or `neo4j` fail
 
 ### Neo4j Connection Refused
 
-- Ensure your Neo4j instance is running
-- For AuraDB: use `neo4j+s://` protocol
-- For local: use `bolt://localhost:7687`
-- Check credentials (username/password)
+Ensure your Neo4j instance is running and the URI/credentials are correct. For AuraDB, use `neo4j+s://` protocol. For local instances, use `bolt://localhost:7687`.
 
 ### Generated Data Is Out of Context
 
-The data generator uses context-aware generation based on node labels. If you're seeing generic data, ensure your node labels match common patterns (e.g., `Drug`, `Patient`, `Vehicle`). You can also add custom generators — see [Adding Custom Models](#adding-custom-models).
+Ensure your node labels match common patterns (e.g., `Drug`, `Patient`, `Vehicle`). You can add custom generators — see [Adding Custom Models](#adding-custom-models).
 
 ---
 
 ## Contributing
 
-Contributions welcome! Some areas where help is appreciated:
+Contributions welcome! Areas where help is appreciated:
 
 - **New reference models** — add models for industries not yet covered
 - **Context generators** — improve data realism for specific domains
@@ -480,6 +479,6 @@ Reference data models are based on schemas from [Neo4j's industry use-case docum
 
 ## Acknowledgments
 
-- **Neo4j** — for the [industry use-case documentation](https://neo4j.com/developer/industry-use-cases/) that the reference models are sourced from
-- **arrows.app** — for the JSON schema format used throughout the toolkit
-- **Faker** — for the Python library powering realistic data generation
+- **[Neo4j](https://neo4j.com/)** — for the [industry use-case documentation](https://neo4j.com/developer/industry-use-cases/) that the reference models are sourced from
+- **[arrows.app](https://arrows.app/)** — for the JSON schema format used throughout the toolkit
+- **[Faker](https://faker.readthedocs.io/)** — for the Python library powering realistic data generation
