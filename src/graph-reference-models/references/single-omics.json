@@ -1,0 +1,186 @@
+{
+  "id": "single-omics",
+  "name": "Single-omics Data Integration",
+  "description": "Integrates single-omics data with genes, proteins, pathways and diseases. Source: https://neo4j.com/developer/industry-use-cases/life-sciences/research-development/single-omics/",
+  "industry": "Healthcare & Life Sciences",
+  "tags": [
+    "omics",
+    "genomics",
+    "proteomics",
+    "drug-discovery"
+  ],
+  "initialGraph": {
+    "nodes": [
+      {
+        "id": "n0",
+        "position": {
+          "x": 400,
+          "y": 100
+        },
+        "caption": "Gene",
+        "labels": [
+          "Gene"
+        ],
+        "properties": {
+          "geneId": "string",
+          "symbol": "string",
+          "name": "string",
+          "chromosome": "string"
+        },
+        "style": {
+          "color": "#68BC00",
+          "radius": 55
+        }
+      },
+      {
+        "id": "n1",
+        "position": {
+          "x": 150,
+          "y": 250
+        },
+        "caption": "Protein",
+        "labels": [
+          "Protein"
+        ],
+        "properties": {
+          "proteinId": "string",
+          "name": "string",
+          "uniprotId": "string"
+        },
+        "style": {
+          "color": "#009CE0",
+          "radius": 50
+        }
+      },
+      {
+        "id": "n2",
+        "position": {
+          "x": 650,
+          "y": 250
+        },
+        "caption": "Pathway",
+        "labels": [
+          "Pathway"
+        ],
+        "properties": {
+          "pathwayId": "string",
+          "name": "string",
+          "source": "string"
+        },
+        "style": {
+          "color": "#FA28FF",
+          "radius": 50
+        }
+      },
+      {
+        "id": "n3",
+        "position": {
+          "x": 400,
+          "y": 400
+        },
+        "caption": "Disease",
+        "labels": [
+          "Disease"
+        ],
+        "properties": {
+          "diseaseId": "string",
+          "name": "string"
+        },
+        "style": {
+          "color": "#7B64FF",
+          "radius": 50
+        }
+      },
+      {
+        "id": "n4",
+        "position": {
+          "x": 150,
+          "y": 400
+        },
+        "caption": "Drug",
+        "labels": [
+          "Drug"
+        ],
+        "properties": {
+          "drugId": "string",
+          "name": "string"
+        },
+        "style": {
+          "color": "#FE9200",
+          "radius": 45
+        }
+      },
+      {
+        "id": "n5",
+        "position": {
+          "x": 650,
+          "y": 400
+        },
+        "caption": "Organism",
+        "labels": [
+          "Organism"
+        ],
+        "properties": {
+          "taxonomyId": "string",
+          "name": "string"
+        },
+        "style": {
+          "color": "#FCDC00",
+          "radius": 40
+        }
+      }
+    ],
+    "relationships": [
+      {
+        "id": "r0",
+        "type": "ENCODES",
+        "fromId": "n0",
+        "toId": "n1",
+        "properties": {}
+      },
+      {
+        "id": "r1",
+        "type": "PARTICIPATES_IN",
+        "fromId": "n1",
+        "toId": "n2",
+        "properties": {}
+      },
+      {
+        "id": "r2",
+        "type": "ASSOCIATED_WITH",
+        "fromId": "n0",
+        "toId": "n3",
+        "properties": {}
+      },
+      {
+        "id": "r3",
+        "type": "TARGETS",
+        "fromId": "n4",
+        "toId": "n1",
+        "properties": {}
+      },
+      {
+        "id": "r4",
+        "type": "INTERACTS_WITH",
+        "fromId": "n1",
+        "toId": "n1",
+        "properties": {}
+      },
+      {
+        "id": "r5",
+        "type": "BELONGS_TO",
+        "fromId": "n0",
+        "toId": "n5",
+        "properties": {}
+      },
+      {
+        "id": "r6",
+        "type": "INVOLVED_IN",
+        "fromId": "n2",
+        "toId": "n3",
+        "properties": {}
+      }
+    ],
+    "style": {}
+  }
+}

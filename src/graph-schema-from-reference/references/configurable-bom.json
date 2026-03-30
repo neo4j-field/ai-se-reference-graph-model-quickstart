@@ -1,0 +1,132 @@
+{
+  "id": "configurable-bom",
+  "name": "Configurable Bill of Materials",
+  "description": "Models configurable product structures with config groups, parts and variant resolution. Source: https://neo4j.com/developer/industry-use-cases/manufacturing/product-design-and-engineering/configurable-bom/",
+  "industry": "Manufacturing",
+  "tags": [
+    "BOM",
+    "product-design",
+    "manufacturing",
+    "configuration"
+  ],
+  "initialGraph": {
+    "nodes": [
+      {
+        "id": "n0",
+        "position": {
+          "x": 400,
+          "y": 50
+        },
+        "caption": "Product",
+        "labels": [
+          "Product"
+        ],
+        "properties": {
+          "productId": "string",
+          "name": "string",
+          "version": "string"
+        },
+        "style": {
+          "color": "#68BC00",
+          "radius": 55
+        }
+      },
+      {
+        "id": "n1",
+        "position": {
+          "x": 250,
+          "y": 200
+        },
+        "caption": "ConfigGroup",
+        "labels": [
+          "ConfigGroup"
+        ],
+        "properties": {
+          "category": "string",
+          "name": "string"
+        },
+        "style": {
+          "color": "#009CE0",
+          "radius": 50
+        }
+      },
+      {
+        "id": "n2",
+        "position": {
+          "x": 550,
+          "y": 200
+        },
+        "caption": "Part",
+        "labels": [
+          "Part"
+        ],
+        "properties": {
+          "partNumber": "string",
+          "name": "string",
+          "cost": "float",
+          "weight": "float"
+        },
+        "style": {
+          "color": "#FA28FF",
+          "radius": 50
+        }
+      },
+      {
+        "id": "n3",
+        "position": {
+          "x": 400,
+          "y": 400
+        },
+        "caption": "Variant",
+        "labels": [
+          "Variant"
+        ],
+        "properties": {
+          "variantId": "string",
+          "name": "string"
+        },
+        "style": {
+          "color": "#7B64FF",
+          "radius": 45
+        }
+      }
+    ],
+    "relationships": [
+      {
+        "id": "r0",
+        "type": "HAS_CONFIG",
+        "fromId": "n0",
+        "toId": "n1",
+        "properties": {}
+      },
+      {
+        "id": "r1",
+        "type": "HAS_OPTION",
+        "fromId": "n1",
+        "toId": "n2",
+        "properties": {
+          "qty": "integer"
+        }
+      },
+      {
+        "id": "r2",
+        "type": "CONTAINS",
+        "fromId": "n2",
+        "toId": "n2",
+        "properties": {
+          "qty": "integer"
+        }
+      },
+      {
+        "id": "r3",
+        "type": "RESOLVED_LINK",
+        "fromId": "n0",
+        "toId": "n2",
+        "properties": {
+          "id_variant": "string"
+        }
+      }
+    ],
+    "style": {}
+  }
+}

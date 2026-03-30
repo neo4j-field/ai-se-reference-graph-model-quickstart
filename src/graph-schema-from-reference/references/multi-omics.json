@@ -1,0 +1,235 @@
+{
+  "id": "multi-omics",
+  "name": "Multi-omics Data Integration",
+  "description": "Integrates multiple omics layers (genomics, transcriptomics, proteomics, metabolomics) into a unified graph. Source: https://neo4j.com/developer/industry-use-cases/life-sciences/research-development/multi-omics/",
+  "industry": "Healthcare & Life Sciences",
+  "tags": [
+    "multi-omics",
+    "systems-biology",
+    "metabolomics"
+  ],
+  "initialGraph": {
+    "nodes": [
+      {
+        "id": "n0",
+        "position": {
+          "x": 400,
+          "y": 50
+        },
+        "caption": "Gene",
+        "labels": [
+          "Gene"
+        ],
+        "properties": {
+          "geneId": "string",
+          "symbol": "string",
+          "chromosome": "string"
+        },
+        "style": {
+          "color": "#68BC00",
+          "radius": 50
+        }
+      },
+      {
+        "id": "n1",
+        "position": {
+          "x": 200,
+          "y": 200
+        },
+        "caption": "Transcript",
+        "labels": [
+          "Transcript"
+        ],
+        "properties": {
+          "transcriptId": "string",
+          "type": "string"
+        },
+        "style": {
+          "color": "#009CE0",
+          "radius": 45
+        }
+      },
+      {
+        "id": "n2",
+        "position": {
+          "x": 600,
+          "y": 200
+        },
+        "caption": "Protein",
+        "labels": [
+          "Protein"
+        ],
+        "properties": {
+          "proteinId": "string",
+          "name": "string"
+        },
+        "style": {
+          "color": "#FA28FF",
+          "radius": 50
+        }
+      },
+      {
+        "id": "n3",
+        "position": {
+          "x": 150,
+          "y": 400
+        },
+        "caption": "Metabolite",
+        "labels": [
+          "Metabolite"
+        ],
+        "properties": {
+          "metaboliteId": "string",
+          "name": "string",
+          "formula": "string"
+        },
+        "style": {
+          "color": "#7B64FF",
+          "radius": 45
+        }
+      },
+      {
+        "id": "n4",
+        "position": {
+          "x": 400,
+          "y": 400
+        },
+        "caption": "Pathway",
+        "labels": [
+          "Pathway"
+        ],
+        "properties": {
+          "pathwayId": "string",
+          "name": "string"
+        },
+        "style": {
+          "color": "#FE9200",
+          "radius": 45
+        }
+      },
+      {
+        "id": "n5",
+        "position": {
+          "x": 650,
+          "y": 400
+        },
+        "caption": "Phenotype",
+        "labels": [
+          "Phenotype"
+        ],
+        "properties": {
+          "phenotypeId": "string",
+          "name": "string"
+        },
+        "style": {
+          "color": "#FCDC00",
+          "radius": 45
+        }
+      },
+      {
+        "id": "n6",
+        "position": {
+          "x": 400,
+          "y": 550
+        },
+        "caption": "Disease",
+        "labels": [
+          "Disease"
+        ],
+        "properties": {
+          "diseaseId": "string",
+          "name": "string"
+        },
+        "style": {
+          "color": "#A4DD00",
+          "radius": 45
+        }
+      },
+      {
+        "id": "n7",
+        "position": {
+          "x": 150,
+          "y": 550
+        },
+        "caption": "Drug",
+        "labels": [
+          "Drug"
+        ],
+        "properties": {
+          "drugId": "string",
+          "name": "string"
+        },
+        "style": {
+          "color": "#68CCCA",
+          "radius": 40
+        }
+      }
+    ],
+    "relationships": [
+      {
+        "id": "r0",
+        "type": "TRANSCRIBES_TO",
+        "fromId": "n0",
+        "toId": "n1",
+        "properties": {}
+      },
+      {
+        "id": "r1",
+        "type": "TRANSLATES_TO",
+        "fromId": "n1",
+        "toId": "n2",
+        "properties": {}
+      },
+      {
+        "id": "r2",
+        "type": "CATALYZES",
+        "fromId": "n2",
+        "toId": "n3",
+        "properties": {}
+      },
+      {
+        "id": "r3",
+        "type": "PARTICIPATES_IN",
+        "fromId": "n2",
+        "toId": "n4",
+        "properties": {}
+      },
+      {
+        "id": "r4",
+        "type": "ASSOCIATED_WITH",
+        "fromId": "n0",
+        "toId": "n5",
+        "properties": {}
+      },
+      {
+        "id": "r5",
+        "type": "MANIFESTS_AS",
+        "fromId": "n5",
+        "toId": "n6",
+        "properties": {}
+      },
+      {
+        "id": "r6",
+        "type": "TARGETS",
+        "fromId": "n7",
+        "toId": "n2",
+        "properties": {}
+      },
+      {
+        "id": "r7",
+        "type": "INVOLVED_IN",
+        "fromId": "n4",
+        "toId": "n6",
+        "properties": {}
+      },
+      {
+        "id": "r8",
+        "type": "INTERACTS_WITH",
+        "fromId": "n2",
+        "toId": "n2",
+        "properties": {}
+      }
+    ],
+    "style": {}
+  }
+}

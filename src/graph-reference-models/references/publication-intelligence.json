@@ -1,0 +1,152 @@
+{
+  "id": "publication-intelligence",
+  "name": "Publication Intelligence",
+  "description": "Analyses scientific publication networks with papers, authors, institutions, journals and topics. Source: https://neo4j.com/developer/industry-use-cases/life-sciences/competitive-intelligence/publication-intelligence/",
+  "industry": "Healthcare & Life Sciences",
+  "tags": [
+    "publication",
+    "research",
+    "competitive-intelligence",
+    "KOL"
+  ],
+  "initialGraph": {
+    "nodes": [
+      {
+        "id": "n0",
+        "position": {
+          "x": 400,
+          "y": 100
+        },
+        "caption": "Publication",
+        "labels": [
+          "Publication"
+        ],
+        "properties": {
+          "id": "string",
+          "title": "string",
+          "date": "date",
+          "doi": "string"
+        },
+        "style": {
+          "color": "#68BC00",
+          "radius": 55
+        }
+      },
+      {
+        "id": "n1",
+        "position": {
+          "x": 150,
+          "y": 100
+        },
+        "caption": "Author",
+        "labels": [
+          "Author"
+        ],
+        "properties": {
+          "id": "string",
+          "name": "string"
+        },
+        "style": {
+          "color": "#009CE0",
+          "radius": 50
+        }
+      },
+      {
+        "id": "n2",
+        "position": {
+          "x": 650,
+          "y": 100
+        },
+        "caption": "Institution",
+        "labels": [
+          "Institution"
+        ],
+        "properties": {
+          "id": "string",
+          "name": "string",
+          "country": "string"
+        },
+        "style": {
+          "color": "#FA28FF",
+          "radius": 45
+        }
+      },
+      {
+        "id": "n3",
+        "position": {
+          "x": 150,
+          "y": 350
+        },
+        "caption": "Journal",
+        "labels": [
+          "Journal"
+        ],
+        "properties": {
+          "id": "string",
+          "name": "string",
+          "impactFactor": "float"
+        },
+        "style": {
+          "color": "#7B64FF",
+          "radius": 45
+        }
+      },
+      {
+        "id": "n4",
+        "position": {
+          "x": 400,
+          "y": 350
+        },
+        "caption": "Topic",
+        "labels": [
+          "Topic"
+        ],
+        "properties": {
+          "name": "string"
+        },
+        "style": {
+          "color": "#FE9200",
+          "radius": 40
+        }
+      }
+    ],
+    "relationships": [
+      {
+        "id": "r0",
+        "type": "AUTHORED_BY",
+        "fromId": "n0",
+        "toId": "n1",
+        "properties": {}
+      },
+      {
+        "id": "r1",
+        "type": "AFFILIATED_WITH",
+        "fromId": "n1",
+        "toId": "n2",
+        "properties": {}
+      },
+      {
+        "id": "r2",
+        "type": "PUBLISHED_IN",
+        "fromId": "n0",
+        "toId": "n3",
+        "properties": {}
+      },
+      {
+        "id": "r3",
+        "type": "ABOUT_TOPIC",
+        "fromId": "n0",
+        "toId": "n4",
+        "properties": {}
+      },
+      {
+        "id": "r4",
+        "type": "REFERENCES",
+        "fromId": "n0",
+        "toId": "n0",
+        "properties": {}
+      }
+    ],
+    "style": {}
+  }
+}
