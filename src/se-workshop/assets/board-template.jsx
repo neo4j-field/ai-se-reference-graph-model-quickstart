@@ -111,8 +111,13 @@ body {
 .swatch:hover { border-color: #64748b; }
 
 /* ── Board ── */
-#board { flex: 1; overflow: auto; padding: 16px; }
+#board { flex: 1; overflow: auto; padding: 16px; position: relative; }
 #board-inner { display: flex; gap: 12px; align-items: flex-start; min-height: 100%; }
+#board-fade {
+  position: absolute; top: 0; right: 0; bottom: 0; width: 40px; pointer-events: none;
+  background: linear-gradient(to right, transparent, #0b1121);
+  transition: opacity 0.2s;
+}
 
 /* ── Column ── */
 .col { display: flex; flex-direction: column; gap: 8px; flex: 1; min-width: 155px; transition: flex 0.25s, opacity 0.2s; }
@@ -122,7 +127,7 @@ body {
 .col-hdr {
   font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em;
   color: #64748b; padding-bottom: 8px; border-bottom: 1px solid #1e293b; margin-bottom: 2px;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  white-space: normal; word-break: break-word; line-height: 1.4;
   cursor: pointer; user-select: none; transition: color 0.15s;
 }
 .col-hdr:hover { color: #94a3b8; }
@@ -199,13 +204,14 @@ body {
   <div id="inspector">
     <div class="sidebar-hdr">Inspector</div>
     <div class="sidebar-body" id="insp-body">
-      <div class="insp-empty">Click any card to edit its color or content.</div>
+      <div class="insp-empty">Click a card to select it, then use the color picker to change its color. Edit content directly on the board.</div>
     </div>
   </div>
 
   <!-- Board -->
   <div id="board">
     <div id="board-inner"></div>
+    <div id="board-fade"></div>
   </div>
 
   <!-- Challenger (collapsed by default) -->
@@ -307,7 +313,7 @@ function renderInspector() {
   const card = S.selId ? findCard(S.selId) : null;
 
   if (!card) {
-    body.innerHTML = `<div class="insp-empty">Click any card to edit its color or content.</div>`;
+    body.innerHTML = `<div class="insp-empty">Click a card to select it, then use the color picker to change its color. Edit content directly on the board.</div>`;
     return;
   }
 
@@ -473,11 +479,24 @@ function initToolbar() {
   });
 }
 
+// ── Scroll fade ───────────────────────────────────────────────────────────────
+function initScrollFade() {
+  const board = document.getElementById('board');
+  const fade  = document.getElementById('board-fade');
+  function update() {
+    const atEnd = board.scrollLeft + board.clientWidth >= board.scrollWidth - 4;
+    fade.style.opacity = atEnd ? '0' : '1';
+  }
+  board.addEventListener('scroll', update, { passive: true });
+  update();
+}
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 initToolbar();
 buildBoard();
 renderInspector();
 renderChallenger();
+initScrollFade();
 </script>
 </body>
 </html>

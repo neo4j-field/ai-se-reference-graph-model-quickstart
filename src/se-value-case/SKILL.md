@@ -27,10 +27,10 @@ AI is never the outcome — AI enables a decision; the decision creates the valu
 
 ## Before Generating: Ask for What's Missing
 
-**All questions must use `AskUserQuestion`.** Never ask questions inline in chat.
+**All questions must use `AskUserQuestion` in checkbox format.** Never ask questions inline in chat. Never use free-text input. Generate 4–6 relevant options per question (tailored to the use case) plus "Other / add context" as the last option.
 
 Check the conversation for: use case, business pain, baseline metrics, desired outcome.
-If any are missing, use `AskUserQuestion` — ask at most 3 questions in one call:
+If any are missing, use `AskUserQuestion` (checkbox) — ask at most 3 questions in one call:
 - What is the core business pain? (if not in conversation)
 - Do you have any baseline numbers? (e.g. detection rate, volume processed, manual review cost, time to decision)
 - What does success look like in a number?

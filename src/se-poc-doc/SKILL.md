@@ -26,9 +26,9 @@ Every element must connect back to the decision being made.
 
 ## Before Generating: Ask for What's Missing
 
-**All questions must use `AskUserQuestion`.** Never ask questions inline in chat.
+**All questions must use `AskUserQuestion` in checkbox format.** Never ask questions inline in chat. Never use free-text input. Generate 4–6 relevant options per question plus "Other / add context" as the last option.
 
-If not clear from the conversation, use `AskUserQuestion` — max 2 questions in one call:
+If not clear from the conversation, use `AskUserQuestion` (checkbox) — max 2 questions in one call:
 - What buying decision does this POC need to prove?
 - What must be true for the customer to say yes at the end?
 

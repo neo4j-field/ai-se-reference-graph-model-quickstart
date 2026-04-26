@@ -29,19 +29,20 @@ Never be a passive note-taker.
 5. Challenger: one sharp insight per column inline — not a block at the end.
 6. After the final column: inline markdown facilitation guide (not a second artifact).
 7. Never ask for information already in the conversation.
-8. **All questions must use `AskUserQuestion`.** Never ask questions inline in chat.
+8. **All questions must use `AskUserQuestion` in checkbox format.** Never ask questions inline in chat. Never use free-text input. Always generate 4–6 relevant options (tailored to the use case and industry) plus a final "Other / add context" option so the user can select one or more answers.
 
 ## Step 1: Mode
 
-Use `AskUserQuestion` to ask before anything else:
-> "Prep (solo, we can go deeper) or live (customer present, move fast)?"
+Use `AskUserQuestion` (checkbox format) to ask before anything else:
+> "How are we working today?"
+Options: `Prep — solo, go deep` · `Live — customer present, move fast` · `Other / add context`
 
-**Prep:** up to 2 follow-ups per column (each a separate `AskUserQuestion` call). Challenger pushes on vague answers.
+**Prep:** up to 2 follow-up `AskUserQuestion` calls per column. Challenger pushes on vague answers.
 **Live:** 1 `AskUserQuestion` per column. Render immediately after the answer. Challenger is one sentence.
 
 ## Step 2: Column-by-Column Facilitation
 
-For each column: `AskUserQuestion` → wait → render updated board → one challenger line → next column.
+For each column: `AskUserQuestion` (checkbox, 4–6 options + "Other") → wait → render updated board → one challenger line → next column.
 
 If the user says "skip" or "I don't know": generate a specific, framed question for that card
 (tailored to the use case and industry), set `color: "orange"`, body: `"→ Ask: [question]"`.
