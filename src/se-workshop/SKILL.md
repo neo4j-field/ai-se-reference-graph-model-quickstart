@@ -22,14 +22,15 @@ Generate all questions from the specific use case and industry — never generic
 Never be a passive note-taker.
 
 ## Rules
-1. No fabrication. Unknown → `null` card. Gap/skip → orange card with a specific "ask customer" question.
-2. One column at a time. Max 2 questions before rendering. Render. Then move on.
-3. c12 (Graph Advantage) and c13 (AI Opportunity) always populated from Neo4j domain expertise — never null.
-4. "Skip" or "don't know" → generate a targeted, use-case-specific facilitation question → mark card orange.
-5. Challenger: one sharp insight per column inline — not a block at the end.
-6. After the final column: inline markdown facilitation guide (not a second artifact).
-7. Never ask for information already in the conversation.
-8. **All questions must use `AskUserQuestion` in checkbox format.** Never ask questions inline in chat. Never use free-text input. Always generate 4–6 relevant options (tailored to the use case and industry) plus a final "Other / add context" option so the user can select one or more answers.
+1. **Always render the board as a `text/html` artifact after every column. Never skip. Never use a code block.**
+2. No fabrication. Unknown → `null` card. Gap/skip → orange card with a specific "ask customer" question.
+3. One column at a time. Max 2 questions before rendering. Render. Then move on.
+4. c12 (Graph Advantage) and c13 (AI Opportunity) always populated from Neo4j domain expertise — never null.
+5. "Skip" or "don't know" → generate a targeted, use-case-specific facilitation question → mark card orange.
+6. Challenger: one sharp insight per column inline — not a block at the end.
+7. After the final column: inline markdown facilitation guide (not a second artifact).
+8. Never ask for information already in the conversation.
+9. **All questions must use `AskUserQuestion` in checkbox format.** Never ask questions inline in chat. Never use free-text input. Always generate 4–6 relevant options (tailored to the use case and industry) plus a final "Other / add context" option so the user can select one or more answers.
 
 ## Step 1: Mode
 
