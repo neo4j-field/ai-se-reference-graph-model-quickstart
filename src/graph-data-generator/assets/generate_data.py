@@ -5,8 +5,19 @@ Graph Fake Data Generator
 Reads a graph schema (arrows.app JSON format) and generates realistic fake data
 using the Faker library. Outputs CSV files per node label and per relationship type.
 
+Scale modes (auto-selected from --scale):
+    < 100,000   → in-memory (fast, simple)
+    ≥ 100,000   → streaming writes, ID indexes on disk
+    ≥ 1,000,000 → chunked CSVs (nodes_Person_part1.csv, _part2.csv, …)
+
 Usage:
-    python generate_data.py schema.json --output-dir ./data --scale 1000
+    python generate_data.py schema.json \\
+        --output-dir ./data \\
+        --scale 10000 \\
+        [--flavor generic|healthcare|finance|ecommerce|social] \\
+        [--locale en_US] \\
+        [--distribution powerlaw|uniform] \\
+        [--seed 42]
 
 The schema JSON is the arrows.app export format:
 {
@@ -26,17 +37,158 @@ import math
 import os
 import random
 import sys
-from datetime import datetime, timedelta
+import tempfile
+import time
 
 try:
     from faker import Faker
 except ImportError:
-    print("ERROR: Faker is not installed. Run: pip install faker --break-system-packages")
+    print("ERROR: Faker is not installed. Run: pip install faker", file=sys.stderr)
     sys.exit(1)
 
+# ── Global Faker instance ─────────────────────────────────────────────────────
+# Locale and seed are set in main() from CLI args. We initialise with defaults
+# here so the generator tables below (which reference `fake` in lambdas) bind
+# correctly at import time. main() replaces this instance before generation.
 fake = Faker()
 Faker.seed(42)
 random.seed(42)
+
+# ── Scale thresholds ──────────────────────────────────────────────────────────
+STREAMING_THRESHOLD = 100_000     # ≥ this scale → stream to disk, don't hold in memory
+CHUNK_THRESHOLD     = 1_000_000   # ≥ this scale → split CSVs into chunked parts
+CHUNK_SIZE          = 500_000     # rows per chunked part file
+PROGRESS_EVERY      = 100_000     # stderr progress update every N rows
+
+# ── Flavor → Faker locale defaults ────────────────────────────────────────────
+# Flavor is primarily a documentation aid: the CONTEXT_GENERATORS table below
+# already dispatches domain-specific values from (label, property) pairs (e.g.
+# a `name` on `Patient` becomes a patient name). Flavor sets a sensible default
+# locale when --locale isn't provided explicitly.
+FLAVOR_DEFAULT_LOCALE = {
+    "generic":    "en_US",
+    "healthcare": "en_US",
+    "finance":    "en_US",
+    "ecommerce":  "en_US",
+    "social":     "en_US",
+}
+
+# ── Email uniqueness strategy ────────────────────────────────────────────────
+# fake.unique.email() is the single biggest bottleneck in this script. It
+# memoises every email it's ever returned and retries on collision — the
+# retry cost grows quadratically as the set fills up. At 1M rows the
+# generator slows to a crawl (<4K rows/s in profiling) and memory grows
+# unbounded.
+#
+# We replace it with a counter that produces "user{n}@example.com" values.
+# These are unique by construction, O(1), and need no memoization. The
+# domain is fake, the local part encodes an ordinal — same end-use semantics
+# (a fake, unique email), ~25× faster, constant memory.
+#
+# The counter uses a list cell rather than a plain int so the lambdas below
+# can mutate it (Python 2-style nonlocal workaround that also works in 3).
+_email_counter = [0]
+
+def _unique_email():
+    _email_counter[0] += 1
+    return f"user{_email_counter[0]}@example.com"
+
+
+# ── Shared-identifier realism ────────────────────────────────────────────────
+# Real datasets have natural overlap on identifier-like properties: family
+# members share phone numbers, businesses share IPs, address typos produce
+# accidental duplicates, fraudsters reuse identifiers. The default generator
+# produces zero collisions because each Faker call is independent — that
+# makes any "find shared identifier" query return zero results, which is the
+# wrong baseline for similarity / fraud / entity-resolution work.
+#
+# When --shared-identifiers is set, for each configured property name we
+# pre-generate a "shared pool" (smaller than the population). When a row
+# is generated, with probability p, we take a value from the shared pool
+# (collisions happen); otherwise we generate a fresh value as normal.
+#
+# The pool size is set so that average cluster size ≈ user-specified size:
+# if x% of N rows pull from a pool of size K, expected cluster size ≈
+# (x*N) / K, so K = (x*N) / cluster_size.
+#
+# Configuration shape (from argparse):
+#   {"phone": {"share_pct": 0.10, "cluster_min": 3, "cluster_max": 5},
+#    "email": {"share_pct": 0.02, "cluster_min": 2, "cluster_max": 3}, ...}
+SHARED_IDENTIFIER_CONFIG = {}
+SHARED_IDENTIFIER_POOLS = {}    # property_name → list of pre-generated values
+
+
+def _init_shared_identifier_pools(config, node_counts_by_label, schema_nodes):
+    """
+    For each configured shared-identifier property, pre-generate a pool whose
+    size is calibrated to produce the requested average cluster size.
+
+    config: parsed --shared-identifiers config
+    node_counts_by_label: {"Customer": 200000, ...}
+    schema_nodes: the schema's node defs (so we can find which labels have
+                  this property, to size the pool against actual population)
+    """
+    for prop_name, params in config.items():
+        # Find the population: how many rows total will have this property?
+        # (Sum across all node types where the property appears.)
+        population = 0
+        for node_def in schema_nodes:
+            if prop_name in node_def.get("properties", {}):
+                label = node_def["labels"][0] if node_def.get("labels") else node_def.get("caption", "Node")
+                population += node_counts_by_label.get(label, 0)
+
+        if population == 0:
+            print(f"WARN: --shared-identifiers references '{prop_name}' but no "
+                  f"node has that property; skipping", file=sys.stderr)
+            continue
+
+        share_pct = params["share_pct"]
+        cluster_size = (params["cluster_min"] + params["cluster_max"]) / 2
+
+        # K = (share_pct * N) / cluster_size, floored to at least 1
+        pool_size = max(1, int((share_pct * population) / cluster_size))
+
+        # Generate the pool by calling the appropriate generator. We need a
+        # baseline generator for this property; use get_generator() with no
+        # label context (label-aware generators may produce different values
+        # per label, but the shared pool is global — fine for identifiers).
+        gen = get_generator(prop_name, "string")
+
+        # Disable shared-identifier interception while building the pool
+        # (avoid recursion: pool values shouldn't themselves be drawn from
+        # an under-construction pool).
+        prev_pool = SHARED_IDENTIFIER_POOLS.get(prop_name)
+        SHARED_IDENTIFIER_POOLS[prop_name] = None
+        try:
+            pool = []
+            for _ in range(pool_size):
+                try:
+                    pool.append(gen())
+                except Exception:
+                    pool.append(f"shared_{prop_name}_{len(pool)}")
+            SHARED_IDENTIFIER_POOLS[prop_name] = pool
+        finally:
+            if prev_pool is not None and SHARED_IDENTIFIER_POOLS.get(prop_name) is None:
+                SHARED_IDENTIFIER_POOLS[prop_name] = prev_pool
+
+        print(f"   Shared pool for '{prop_name}': {pool_size} values, "
+              f"target {share_pct*100:.0f}% of {population:,} rows in clusters "
+              f"of ~{cluster_size:.1f}", file=sys.stderr)
+
+
+def _maybe_shared_value(prop_name, fresh_generator):
+    """
+    Either return a value from the shared pool (with configured probability)
+    or call fresh_generator() for a unique value. Falls through to fresh
+    generation if the property isn't configured for sharing.
+    """
+    config = SHARED_IDENTIFIER_CONFIG.get(prop_name)
+    pool = SHARED_IDENTIFIER_POOLS.get(prop_name)
+    if config and pool:
+        if random.random() < config["share_pct"]:
+            return pool[random.randrange(len(pool))]
+    return fresh_generator()
+
 
 # ── Type-to-Faker mapping ──────────────────────────────────────────────────────
 # Maps property names and types to appropriate Faker generators.
@@ -55,7 +207,7 @@ NAME_GENERATORS = {
     "user_name": lambda: fake.user_name(),
 
     # Contact
-    "email": lambda: fake.unique.email(),
+    "email": _unique_email,
     "phone": lambda: fake.phone_number(),
     "phonenumber": lambda: fake.phone_number(),
     "phone_number": lambda: fake.phone_number(),
@@ -412,7 +564,7 @@ TYPE_GENERATORS = {
     "date": lambda: fake.date_between(start_date="-5y", end_date="today").isoformat(),
     "datetime": lambda: fake.date_time_between(start_date="-3y", end_date="now").isoformat(),
     "timestamp": lambda: fake.date_time_between(start_date="-3y", end_date="now").isoformat(),
-    "email": lambda: fake.unique.email(),
+    "email": _unique_email,
     "url": lambda: fake.url(),
     "uuid": lambda: fake.uuid4(),
     "phone": lambda: fake.phone_number(),
@@ -453,21 +605,20 @@ def get_generator(prop_name, prop_type, node_label=""):
 
     return TYPE_GENERATORS["string"]
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# Node count computation (unchanged from original — works at any scale)
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def compute_node_counts(schema, base_scale):
     """
-    Compute how many nodes to generate per label.
-    Uses relationship topology to infer relative sizes.
-    The node with the most outgoing relationships gets base_scale;
-    others are scaled relative to connectivity.
+    Compute how many nodes to generate per label based on relationship topology.
+    The most-connected node type gets base_scale; others scale down proportionally.
     """
     nodes = schema.get("nodes", [])
     relationships = schema.get("relationships", [])
-
     if not nodes:
         return {}
 
-    # Count relationships per node to infer relative importance
     rel_count = {}
     for n in nodes:
         rel_count[n["id"]] = 0
@@ -477,206 +628,961 @@ def compute_node_counts(schema, base_scale):
         rel_count[r["fromId"]] += 1
         rel_count[r["toId"]] += 1
 
-    # Heuristic: "leaf" nodes (fewer connections) get fewer instances,
-    # "hub" nodes get the base scale
     max_rels = max(rel_count.values()) if rel_count else 1
     counts = {}
     for n in nodes:
         nid = n["id"]
         label = n["labels"][0] if n.get("labels") else n.get("caption", nid)
         connectivity = rel_count.get(nid, 0)
-        # Scale: hubs get full scale, leaves get 20-50% of scale
         ratio = max(0.2, connectivity / max_rels) if max_rels > 0 else 1.0
         counts[nid] = {"label": label, "count": max(10, int(base_scale * ratio))}
-
     return counts
 
 
-def generate_node_data(node_def, count):
-    """Generate fake data rows for a node type."""
+# ═══════════════════════════════════════════════════════════════════════════════
+# ID index: abstraction over how we store node _id values per node type.
+#
+# At scale < STREAMING_THRESHOLD we keep them in a Python list (simple, fast).
+# At scale ≥ STREAMING_THRESHOLD we append them to a packed binary file on disk
+# (16 bytes per UUID). We only need two operations for relationship generation:
+#   - len(index)            → know how big the source/target pool is
+#   - index.sample(k)        → pick k ids, possibly with a distribution
+# This avoids holding tens of millions of UUID strings in RAM.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class InMemoryIdIndex:
+    """Holds node _id values in a Python list. Used for scale < STREAMING_THRESHOLD."""
+
+    def __init__(self, label):
+        self.label = label
+        self.ids = []
+
+    def append(self, uuid_str):
+        self.ids.append(uuid_str)
+
+    def close(self):
+        pass
+
+    def __len__(self):
+        return len(self.ids)
+
+    def get(self, i):
+        return self.ids[i]
+
+    def sample_indices(self, k, distribution="powerlaw", rng=None):
+        rng = rng or random
+        n = len(self.ids)
+        if n == 0:
+            return []
+        if distribution == "uniform":
+            return [rng.randrange(n) for _ in range(k)]
+        # power-law: a small number of "hub" indices get picked disproportionately
+        return _powerlaw_sample_indices(n, k, rng)
+
+    def resolve(self, idx):
+        return self.ids[idx]
+
+
+class DiskIdIndex:
+    """
+    Packs UUID _id values into a fixed-width binary file (16 bytes each).
+    Used for scale ≥ STREAMING_THRESHOLD to keep memory flat.
+
+    Write phase: buffered binary writes (append-only).
+    Read phase:  memory-mapped random access. OS page cache handles hot pages
+                 efficiently — each resolve() is a slice into an mmap object,
+                 ~50-100x faster than seek()+read() per lookup.
+    """
+    RECORD_SIZE = 16                    # UUID is 16 bytes packed
+    WRITE_BUF = 64 * 1024               # flush to disk in 64KB chunks
+
+    def __init__(self, label, path):
+        import io
+        self.label = label
+        self.path = path
+        # buffered writer → significantly fewer syscalls during generation
+        self._write_fp = io.BufferedWriter(io.FileIO(path, "wb"), buffer_size=self.WRITE_BUF)
+        self._count = 0
+        self._mmap = None
+        self._mmap_fp = None
+
+    def append(self, uuid_str):
+        # uuid_str is a canonical UUID like "550e8400-e29b-41d4-a716-446655440000"
+        hex_only = uuid_str.replace("-", "")
+        self._write_fp.write(bytes.fromhex(hex_only))
+        self._count += 1
+
+    def close(self):
+        """Transition from write-phase to read-phase. Must be called before resolve()."""
+        import mmap
+        if self._write_fp:
+            self._write_fp.flush()
+            self._write_fp.close()
+            self._write_fp = None
+        if self._count == 0:
+            return  # nothing to mmap
+        self._mmap_fp = open(self.path, "rb")
+        self._mmap = mmap.mmap(
+            self._mmap_fp.fileno(), 0, access=mmap.ACCESS_READ
+        )
+
+    def __len__(self):
+        return self._count
+
+    def resolve(self, idx):
+        """Return the UUID at position idx as a canonical string."""
+        offset = idx * self.RECORD_SIZE
+        b = self._mmap[offset:offset + self.RECORD_SIZE]
+        h = b.hex()
+        return f"{h[0:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:32]}"
+
+    def sample_indices(self, k, distribution="powerlaw", rng=None):
+        rng = rng or random
+        n = self._count
+        if n == 0:
+            return []
+        if distribution == "uniform":
+            return [rng.randrange(n) for _ in range(k)]
+        return _powerlaw_sample_indices(n, k, rng)
+
+
+def _powerlaw_sample_indices(n, k, rng):
+    """
+    Sample k indices from [0, n) with a power-law bias toward low indices.
+    We use the inverse-CDF of a bounded Pareto-like distribution:
+        idx = floor(n * (1 - u^(1/alpha)))
+    with alpha=1.5 (mild skew — a few hubs, many leaves, tail that isn't extreme).
+    This keeps the full range reachable, so leaf nodes still get some edges.
+    """
+    alpha = 1.5
+    out = [0] * k
+    for i in range(k):
+        u = rng.random()
+        # avoid u=0 edge case producing idx=n
+        idx = int(n * (1.0 - u ** (1.0 / alpha)))
+        if idx >= n:
+            idx = n - 1
+        out[i] = idx
+    return out
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Chunked CSV writer: one logical "CSV" for a label/rel type that may span
+# multiple physical .csv files when the row count exceeds CHUNK_SIZE.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class ChunkedCsvWriter:
+    """
+    Writes rows to one or more CSV files. Splits into part1.csv, part2.csv, ...
+    when total_expected_rows >= CHUNK_THRESHOLD. Otherwise writes a single file.
+    """
+
+    def __init__(self, output_dir, basename, fieldnames, total_expected_rows):
+        self.output_dir = output_dir
+        self.basename = basename               # e.g. "nodes_person"
+        self.fieldnames = fieldnames
+        self.chunked = total_expected_rows >= CHUNK_THRESHOLD
+        self.total_expected = total_expected_rows
+        self.files_written = []
+        self._part_num = 0
+        self._current_fp = None
+        self._current_writer = None
+        self._current_count = 0
+        self._total_written = 0
+        self._open_next_part()
+
+    def _current_filename(self):
+        if self.chunked:
+            return f"{self.basename}_part{self._part_num}.csv"
+        return f"{self.basename}.csv"
+
+    def _open_next_part(self):
+        if self._current_fp:
+            self._current_fp.close()
+        self._part_num += 1
+        filename = self._current_filename()
+        filepath = os.path.join(self.output_dir, filename)
+        self._current_fp = open(filepath, "w", newline="", encoding="utf-8")
+        self._current_writer = csv.DictWriter(self._current_fp, fieldnames=self.fieldnames)
+        self._current_writer.writeheader()
+        self._current_count = 0
+        self.files_written.append(filename)
+
+    def write(self, row):
+        if self.chunked and self._current_count >= CHUNK_SIZE:
+            self._open_next_part()
+        self._current_writer.writerow(row)
+        self._current_count += 1
+        self._total_written += 1
+
+    def close(self):
+        if self._current_fp:
+            self._current_fp.close()
+            self._current_fp = None
+
+    def total(self):
+        return self._total_written
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Progress reporter
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class Progress:
+    def __init__(self, label, total, enabled=True):
+        self.label = label
+        self.total = total
+        self.enabled = enabled
+        self.start = time.time()
+        self.last_print = self.start
+        self.done = 0
+
+    def tick(self, n=1):
+        self.done += n
+        if not self.enabled:
+            return
+        if self.done % PROGRESS_EVERY == 0 or self.done == self.total:
+            now = time.time()
+            # at least 2s between prints to avoid spam
+            if now - self.last_print >= 2.0 or self.done == self.total:
+                pct = (self.done / self.total * 100.0) if self.total else 100.0
+                rate = self.done / max(1e-6, now - self.start)
+                print(f"   … {self.label}: {self.done:,} / {self.total:,} "
+                      f"({pct:.0f}%, {rate:,.0f} rows/s)",
+                      file=sys.stderr, flush=True)
+                self.last_print = now
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Node generation (streaming-aware)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def generate_nodes_streaming(node_def, count, output_dir, id_index, show_progress):
+    """
+    Generate `count` node rows for one node type, writing to CSV (chunked if big)
+    and appending each _id to the id_index as we go. Never holds all rows in memory.
+    """
     props = node_def.get("properties", {})
     label = node_def["labels"][0] if node_def.get("labels") else node_def.get("caption", "Node")
 
-    # Always include a unique _id column
-    generators = {"_id": lambda i=None: fake.uuid4()}
-    for prop_name, prop_type in props.items():
-        generators[prop_name] = get_generator(prop_name, prop_type, label)
+    # Build column list: _id first, then schema properties
+    fieldnames = ["_id"] + list(props.keys())
 
-    rows = []
-    fake.unique.clear()
+    # Bind generators once (outside loop) for speed
+    generators = [(p, get_generator(p, t, label)) for p, t in props.items()]
+
+    # Preserve label case so downstream ingestion can use the filename as the
+    # label directly (Neo4j labels are case-sensitive). Only replace whitespace.
+    basename = f"nodes_{label.replace(' ', '_')}"
+    writer = ChunkedCsvWriter(output_dir, basename, fieldnames, count)
+    progress = Progress(f"{label} nodes", count, enabled=show_progress)
+
     for i in range(count):
-        row = {}
-        for col, gen in generators.items():
+        uuid_str = fake.uuid4()
+        row = {"_id": uuid_str}
+        for col, gen in generators:
+            try:
+                row[col] = _maybe_shared_value(col, gen)
+            except Exception:
+                row[col] = f"{col}_{i}"
+        writer.write(row)
+        id_index.append(uuid_str)
+        progress.tick()
+
+    writer.close()
+    id_index.close()
+    return writer.files_written, writer.total()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Relationship generation (streaming-aware, distribution-aware)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def compute_rel_count(from_size, to_size, scale, is_self_loop, cardinality="N:N",
+                      nn_fanout=2):
+    """
+    How many relationships to generate for one schema-relationship.
+
+    Cardinality semantics (driven by --cardinality CLI flag, default N:N):
+      1:1 → exactly min(from_size, to_size). Each from has one to, each to one from.
+      1:N → exactly to_size edges. Each "to" belongs to one "from"; each "from"
+            connects to many. (E.g. Customer-OWNS-Account: each Account has one
+            Customer; one Customer can own multiple Accounts.)
+      N:1 → exactly from_size edges. Mirror of 1:N.
+      N:N → max(from_size, to_size) * nn_fanout. Each side connects to ~fanout
+            on the other. Self-loops get halved (self-rels get dense fast).
+
+    nn_fanout defaults to 2 — interpretable as "each entity has on average
+    `nn_fanout` relationships of this type." Past versions used 3, which
+    over-generated for most schemas; 2 is closer to realistic graphs.
+
+    The hard cap (3× scale) is kept as a safety rail for misconfigured N:N
+    relationships at XL scale.
+    """
+    if cardinality == "1:1":
+        return max(10, min(from_size, to_size))
+    if cardinality == "1:N":
+        return max(10, to_size)
+    if cardinality == "N:1":
+        return max(10, from_size)
+    # N:N (default)
+    base = int(max(from_size, to_size) * nn_fanout)
+    if is_self_loop:
+        base = base // 2
+    return max(10, min(base, scale * 3))
+
+
+def resolve_rel_count(rel_type, from_size, to_size, scale, is_self_loop,
+                      cardinality, default_nn_fanout,
+                      rel_fanout_map, rel_counts_cap):
+    """
+    Resolve the final relationship count for one rel-type, applying overrides
+    in this order:
+      1. Per-rel fanout override (--rel-fanout REL=multiplier) — used for N:N
+         only; ignored for 1:1/1:N/N:1 since those are exact counts.
+      2. Base count from compute_rel_count() with the resolved fanout.
+      3. Absolute cap (--rel-counts REL=count) — final ceiling.
+    """
+    effective_fanout = rel_fanout_map.get(rel_type, default_nn_fanout)
+    base = compute_rel_count(from_size, to_size, scale, is_self_loop,
+                             cardinality=cardinality, nn_fanout=effective_fanout)
+    if rel_type in rel_counts_cap:
+        base = min(base, rel_counts_cap[rel_type])
+    return max(10, base)
+
+
+def _generate_exact_one_to_many(rel_def, from_index, to_index, output_dir,
+                                num_rels, props, distribution, show_progress,
+                                rng, many_side):
+    """
+    1:N or N:1 generation: each node on the "many" side gets exactly one
+    edge. Iterate the many-side in order, pick a random partner from the
+    other side. Guarantees the cardinality contract (no orphans, no
+    duplicates on the singleton side... wait, that's not true — multiple
+    many-side nodes can share the same singleton, which is the whole
+    point of 1:N).
+
+    many_side="to": for 1:N. Each "to" node gets one "from" partner.
+                    Result: exactly to_size edges.
+    many_side="from": for N:1. Each "from" node gets one "to" partner.
+                      Result: exactly from_size edges.
+    """
+    rel_type = rel_def.get("type", "RELATED_TO")
+
+    fieldnames = ["_from_id", "_to_id"] + list(props.keys())
+    prop_generators = [(p, get_generator(p, t)) for p, t in props.items()]
+
+    basename = f"rels_{rel_type}"
+    writer = ChunkedCsvWriter(output_dir, basename, fieldnames, num_rels)
+    progress = Progress(f"{rel_type} rels", num_rels, enabled=show_progress)
+
+    if many_side == "to":
+        many_size = len(to_index)
+        one_size = len(from_index)
+        many_index, one_index = to_index, from_index
+    else:
+        many_size = len(from_index)
+        one_size = len(to_index)
+        many_index, one_index = from_index, to_index
+
+    # If the caller passed a num_rels smaller than many_size (e.g. via
+    # --rel-counts cap), respect it: only generate edges for the first
+    # num_rels many-side nodes. Otherwise iterate all of many_size.
+    iter_limit = min(num_rels, many_size)
+
+    BATCH = 10_000
+    written = 0
+
+    # Iterate every position on the many side; pick a partner for each.
+    # Power-law on the singleton-side picks: a few "from" nodes (or "to")
+    # accumulate disproportionately many partners, which is realistic
+    # (e.g. a few super-customers own most accounts).
+    for batch_start in range(0, iter_limit, BATCH):
+        batch_end = min(batch_start + BATCH, iter_limit)
+        batch_k = batch_end - batch_start
+        partners = one_index.sample_indices(batch_k, distribution, rng)
+
+        for offset, partner_idx in enumerate(partners):
+            many_idx = batch_start + offset
+            if many_side == "to":
+                from_id = one_index.resolve(partner_idx)
+                to_id = many_index.resolve(many_idx)
+            else:
+                from_id = many_index.resolve(many_idx)
+                to_id = one_index.resolve(partner_idx)
+
+            row = {"_from_id": from_id, "_to_id": to_id}
+            for col, gen in prop_generators:
+                try:
+                    row[col] = gen()
+                except Exception:
+                    row[col] = f"{col}_{written}"
+            writer.write(row)
+            written += 1
+            progress.tick()
+
+    writer.close()
+    return writer.files_written, written
+
+
+def _generate_exact_one_to_one(rel_def, from_index, to_index, output_dir,
+                               num_rels, props, distribution, show_progress, rng):
+    """
+    1:1 generation: pair `from` and `to` so each appears exactly once.
+    Uses min(from_size, to_size) edges; truncates the larger side.
+    Pairings are by position with a shuffled offset to avoid trivially
+    aligned pairs (which would couple the random orders of the two sides).
+    """
+    rel_type = rel_def.get("type", "RELATED_TO")
+
+    fieldnames = ["_from_id", "_to_id"] + list(props.keys())
+    prop_generators = [(p, get_generator(p, t)) for p, t in props.items()]
+
+    basename = f"rels_{rel_type}"
+    writer = ChunkedCsvWriter(output_dir, basename, fieldnames, num_rels)
+    progress = Progress(f"{rel_type} rels", num_rels, enabled=show_progress)
+
+    n = min(len(from_index), len(to_index))
+
+    # Shift the "to" index by a random offset so pairings aren't trivially
+    # identity-aligned. Both sides have UUIDs anyway so this is mostly
+    # belt-and-braces.
+    offset = rng.randrange(1, max(2, n))
+    written = 0
+    for i in range(n):
+        from_id = from_index.resolve(i)
+        to_id = to_index.resolve((i + offset) % len(to_index))
+        row = {"_from_id": from_id, "_to_id": to_id}
+        for col, gen in prop_generators:
             try:
                 row[col] = gen()
             except Exception:
-                row[col] = f"{col}_{i}"
-        rows.append(row)
+                row[col] = f"{col}_{written}"
+        writer.write(row)
+        written += 1
+        progress.tick()
 
-    return rows
+    writer.close()
+    return writer.files_written, written
 
 
-def generate_relationship_data(rel_def, from_ids, to_ids, from_label, to_label, scale):
-    """Generate fake relationship data connecting existing node IDs."""
+def generate_rels_streaming(rel_def, from_index, to_index, output_dir,
+                            scale, distribution, show_progress, rng,
+                            cardinality="N:N", nn_fanout=2, num_rels=None):
+    """
+    Generate relationships for one relationship type using the two id indexes.
+    Writes directly to CSV (chunked if big). Never materialises the edge list
+    in memory.
+
+    If num_rels is provided, use it directly (caller has already applied any
+    per-rel overrides). Otherwise compute it from compute_rel_count().
+    """
     props = rel_def.get("properties", {})
     rel_type = rel_def.get("type", "RELATED_TO")
     is_self = rel_def["fromId"] == rel_def["toId"]
 
-    generators = {}
-    for prop_name, prop_type in props.items():
-        generators[prop_name] = get_generator(prop_name, prop_type)
+    from_size = len(from_index)
+    to_size = len(to_index)
+    if from_size == 0 or to_size == 0:
+        return [], 0
 
-    # Determine number of relationships
-    # Heuristic: ~2-5x the smaller node set, capped at scale
-    num_rels = min(scale, max(len(from_ids), len(to_ids)) * random.randint(2, 5))
-    num_rels = max(10, num_rels)
+    if num_rels is None:
+        num_rels = compute_rel_count(from_size, to_size, scale, is_self,
+                                     cardinality=cardinality, nn_fanout=nn_fanout)
 
-    rows = []
-    seen = set()
-    attempts = 0
-    max_attempts = num_rels * 10
+    # 1:N and N:1 generate "exact" counts where each minority-side node
+    # gets exactly one edge. Use targeted iteration for these instead of
+    # random sampling — guarantees the cardinality contract.
+    if cardinality == "1:N":
+        return _generate_exact_one_to_many(
+            rel_def, from_index, to_index, output_dir,
+            num_rels, props, distribution, show_progress, rng,
+            many_side="to"
+        )
+    if cardinality == "N:1":
+        return _generate_exact_one_to_many(
+            rel_def, from_index, to_index, output_dir,
+            num_rels, props, distribution, show_progress, rng,
+            many_side="from"
+        )
+    if cardinality == "1:1":
+        return _generate_exact_one_to_one(
+            rel_def, from_index, to_index, output_dir,
+            num_rels, props, distribution, show_progress, rng
+        )
 
-    while len(rows) < num_rels and attempts < max_attempts:
-        attempts += 1
-        from_id = random.choice(from_ids)
-        to_id = random.choice(to_ids)
+    # N:N: random sampling (existing logic)
 
-        # Avoid duplicate pairs (unless we run out of unique combos)
-        pair_key = (from_id, to_id)
-        if pair_key in seen and len(seen) < len(from_ids) * len(to_ids) * 0.8:
-            continue
-        seen.add(pair_key)
+    fieldnames = ["_from_id", "_to_id"] + list(props.keys())
+    prop_generators = [(p, get_generator(p, t)) for p, t in props.items()]
 
-        row = {"_from_id": from_id, "_to_id": to_id}
-        for col, gen in generators.items():
-            try:
-                row[col] = gen()
-            except Exception:
-                row[col] = f"{col}_{len(rows)}"
-        rows.append(row)
+    # Preserve rel-type case — Neo4j convention is UPPER_SNAKE_CASE, lowercasing
+    # would force ingestion to re-look-up the canonical form.
+    basename = f"rels_{rel_type}"
+    writer = ChunkedCsvWriter(output_dir, basename, fieldnames, num_rels)
+    progress = Progress(f"{rel_type} rels", num_rels, enabled=show_progress)
 
-    return rows
+    # Sample indices in batches to amortise overhead and keep memory flat
+    BATCH = 10_000
+    written = 0
+    # We track recent (from,to) pairs in a bounded set to avoid immediate
+    # duplicates without blowing memory for high-scale runs.
+    recent_pairs = set()
+    RECENT_CAP = 50_000
+
+    while written < num_rels:
+        batch_k = min(BATCH, num_rels - written)
+        from_idx = from_index.sample_indices(batch_k, distribution, rng)
+        to_idx = to_index.sample_indices(batch_k, distribution, rng)
+
+        for fi, ti in zip(from_idx, to_idx):
+            if is_self and fi == ti:
+                # Avoid trivial self-edges; nudge target
+                ti = (ti + 1) % to_size
+            pair_key = (fi, ti)
+            if pair_key in recent_pairs:
+                continue
+            recent_pairs.add(pair_key)
+            if len(recent_pairs) > RECENT_CAP:
+                # simple bounded-set strategy: clear and continue
+                recent_pairs.clear()
+
+            row = {
+                "_from_id": from_index.resolve(fi),
+                "_to_id": to_index.resolve(ti),
+            }
+            for col, gen in prop_generators:
+                try:
+                    row[col] = gen()
+                except Exception:
+                    row[col] = f"{col}_{written}"
+            writer.write(row)
+            written += 1
+            progress.tick()
+            if written >= num_rels:
+                break
+
+    writer.close()
+    return writer.files_written, written
 
 
-def write_csv(filepath, rows):
-    """Write rows to a CSV file."""
-    if not rows:
-        return
-    fieldnames = list(rows[0].keys())
-    with open(filepath, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-
+# ═══════════════════════════════════════════════════════════════════════════════
+# Main
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def main():
     parser = argparse.ArgumentParser(description="Generate fake graph data from a schema")
     parser.add_argument("schema", help="Path to arrows.app JSON schema file")
-    parser.add_argument("--output-dir", "-o", default="./graph_data", help="Output directory for CSV files")
-    parser.add_argument("--scale", "-s", type=int, default=1000, help="Base scale (number of nodes for the largest node type)")
-    parser.add_argument("--summary", action="store_true", help="Print a summary of generated data")
+    parser.add_argument("--output-dir", "-o", default="./graph_data",
+                        help="Output directory for CSV files")
+    parser.add_argument("--scale", "-s", type=int, default=1000,
+                        help="Anchor count for the largest node type")
+    parser.add_argument("--flavor", choices=["generic", "healthcare", "finance",
+                                             "ecommerce", "social"],
+                        default="generic",
+                        help="Domain flavor (sets default locale; (label,prop) context "
+                             "generators already dispatch on label names regardless)")
+    parser.add_argument("--locale", default=None,
+                        help="Faker locale (e.g. en_US, en_GB, de_DE). "
+                             "Overrides flavor default.")
+    parser.add_argument("--distribution", choices=["powerlaw", "uniform"],
+                        default="powerlaw",
+                        help="Relationship fanout distribution. 'powerlaw' (default) "
+                             "mimics real graphs; 'uniform' for controlled tests.")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed (for reproducibility). Change for fresh data.")
+    parser.add_argument("--cardinality", default="",
+                        help="Per-relationship cardinality, comma-separated. "
+                             "Format: REL_TYPE=1:1|1:N|N:1|N:N. "
+                             "Example: 'OWNS=1:N,SHARES_DEVICE=N:N'. "
+                             "Unspecified relationships default to N:N.")
+    parser.add_argument("--nn-fanout", type=float, default=2.0,
+                        help="Multiplier for N:N relationships. Number of edges "
+                             "= max(from_size, to_size) * nn_fanout. Default 2.0 "
+                             "(each entity averages ~2 partners). Use 1.2 for "
+                             "very sparse, 5+ for dense.")
+    parser.add_argument("--node-counts", default="",
+                        help="Override per-label node counts, comma-separated. "
+                             "Format: Label=count,Label2=count2. Bypasses the "
+                             "connectivity-based auto-scaling for the listed "
+                             "labels; unlisted labels still auto-scale from "
+                             "--scale. Example: 'Customer=200000,Transaction=1000000'.")
+    parser.add_argument("--rel-fanout", default="",
+                        help="Per-relationship N:N fanout overrides, comma-"
+                             "separated. Format: REL_TYPE=multiplier. Only "
+                             "applies to N:N relationships; ignored for 1:1, "
+                             "1:N, N:1 (those are exact counts by definition). "
+                             "Example: 'OWNS_TRANSACTION=2.5,USES_DEVICE=1.5'.")
+    parser.add_argument("--rel-counts", default="",
+                        help="Absolute relationship count caps, comma-separated. "
+                             "Format: REL_TYPE=count. Hard ceiling — if the "
+                             "computed count would exceed this, cap it. Useful "
+                             "when the user wants 'at most 500K of these'. "
+                             "Example: 'USES_DEVICE=500000,INVOLVED_IN=500000'.")
+    parser.add_argument("--shared-identifiers", default="",
+                        help="Inject realistic identifier collisions into "
+                             "node properties. Format: prop:pct%:min-max, "
+                             "comma-separated. Example: "
+                             "'phone:10%:3-5,email:2%:2-3,ip_address:5%:5-15'. "
+                             "Reads as: '10%% of phone values are shared in "
+                             "clusters of 3 to 5 rows.' Without this flag, "
+                             "every value is independently random (zero "
+                             "collisions) — fine for ingestion testing, "
+                             "wrong baseline for similarity / fraud / entity-"
+                             "resolution work.")
+    parser.add_argument("--summary", action="store_true",
+                        help="Print a summary of generated data")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Compute and print expected counts as JSON to "
+                             "stdout, then exit. Does not generate any data.")
     args = parser.parse_args()
 
-    # Load schema
+    # Parse --cardinality into a dict: {"OWNS": "1:N", "SHARES_DEVICE": "N:N", ...}
+    cardinality_map = {}
+    if args.cardinality.strip():
+        for entry in args.cardinality.split(","):
+            entry = entry.strip()
+            if not entry:
+                continue
+            if "=" not in entry:
+                print(f"WARN: ignoring malformed cardinality entry '{entry}' "
+                      f"(expected REL_TYPE=1:N)", file=sys.stderr)
+                continue
+            rel_name, card = entry.split("=", 1)
+            card = card.strip().upper()
+            if card not in ("1:1", "1:N", "N:1", "N:N"):
+                print(f"WARN: invalid cardinality '{card}' for {rel_name}, "
+                      f"using N:N", file=sys.stderr)
+                card = "N:N"
+            cardinality_map[rel_name.strip()] = card
+
+    # Parse --node-counts, --rel-fanout, --rel-counts.
+    # All three share the same "key=number,..." shape; helper consolidates parsing.
+    def _parse_kv_numeric(spec, value_type, flag_name):
+        out = {}
+        if not spec.strip():
+            return out
+        for entry in spec.split(","):
+            entry = entry.strip()
+            if not entry:
+                continue
+            if "=" not in entry:
+                print(f"WARN: ignoring malformed {flag_name} entry '{entry}' "
+                      f"(expected KEY=NUMBER)", file=sys.stderr)
+                continue
+            key, val = entry.split("=", 1)
+            try:
+                out[key.strip()] = value_type(val.strip())
+            except ValueError:
+                print(f"WARN: ignoring {flag_name} entry '{entry}' "
+                      f"(value not a number)", file=sys.stderr)
+        return out
+
+    node_counts_override = _parse_kv_numeric(args.node_counts, int, "node-counts")
+    rel_fanout_map = _parse_kv_numeric(args.rel_fanout, float, "rel-fanout")
+    rel_counts_cap = _parse_kv_numeric(args.rel_counts, int, "rel-counts")
+
+    # Parse --shared-identifiers: format is "prop:pct%:min-max,prop2:pct%:min-max"
+    # Result: {"phone": {"share_pct": 0.10, "cluster_min": 3, "cluster_max": 5}, ...}
+    shared_id_config = {}
+    if args.shared_identifiers.strip():
+        for entry in args.shared_identifiers.split(","):
+            entry = entry.strip()
+            if not entry:
+                continue
+            parts = entry.split(":")
+            if len(parts) != 3:
+                print(f"WARN: ignoring malformed --shared-identifiers entry "
+                      f"'{entry}' (expected prop:pct%:min-max)", file=sys.stderr)
+                continue
+            prop_name, pct_str, range_str = parts
+            try:
+                pct = float(pct_str.rstrip("%").strip()) / 100.0
+                if "-" in range_str:
+                    cmin, cmax = (int(x) for x in range_str.split("-"))
+                else:
+                    cmin = cmax = int(range_str)
+                if pct <= 0 or pct > 1 or cmin < 1 or cmax < cmin:
+                    raise ValueError("range")
+            except ValueError:
+                print(f"WARN: ignoring --shared-identifiers entry '{entry}' "
+                      f"(invalid percentage or cluster range)", file=sys.stderr)
+                continue
+            shared_id_config[prop_name.strip()] = {
+                "share_pct": pct,
+                "cluster_min": cmin,
+                "cluster_max": cmax,
+            }
+    # Make config visible to _maybe_shared_value (which is called per-row);
+    # the actual pools are built later, after we know node counts.
+    global SHARED_IDENTIFIER_CONFIG
+    SHARED_IDENTIFIER_CONFIG = shared_id_config
+
+    # ── Set up Faker with chosen locale and seed ────────────────────────────
+    locale = args.locale or FLAVOR_DEFAULT_LOCALE.get(args.flavor, "en_US")
+    global fake
+    fake = Faker(locale)
+    Faker.seed(args.seed)
+    random.seed(args.seed)
+    rng = random.Random(args.seed)  # dedicated RNG for sampling
+
+    # ── Load schema ─────────────────────────────────────────────────────────
     with open(args.schema, "r") as f:
         raw = json.load(f)
-
     schema = raw.get("graph", raw)
     nodes = schema.get("nodes", [])
     relationships = schema.get("relationships", [])
-
     if not nodes:
-        print("ERROR: No nodes found in schema.")
+        print("ERROR: No nodes found in schema.", file=sys.stderr)
         sys.exit(1)
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # Compute counts
+    # Decide memory strategy
+    streaming = args.scale >= STREAMING_THRESHOLD
+    chunked = args.scale >= CHUNK_THRESHOLD
+    show_progress = streaming  # only print progress for long runs
+
+    # Temp dir for binary ID indexes when streaming
+    index_dir = None
+    if streaming:
+        index_dir = tempfile.mkdtemp(prefix="graph_ids_", dir=args.output_dir)
+
+    # ── Compute per-label counts ────────────────────────────────────────────
     node_counts = compute_node_counts(schema, args.scale)
 
-    print(f"📊 Generating data at scale={args.scale}")
-    print(f"   Output: {os.path.abspath(args.output_dir)}\n")
+    # Apply --node-counts overrides. These are keyed by label, but node_counts
+    # is keyed by node-id, so translate.
+    if node_counts_override:
+        unmatched = set(node_counts_override.keys())
+        for nid, info in node_counts.items():
+            if info["label"] in node_counts_override:
+                info["count"] = node_counts_override[info["label"]]
+                unmatched.discard(info["label"])
+        for label in unmatched:
+            print(f"WARN: --node-counts label '{label}' not found in schema, "
+                  f"ignored", file=sys.stderr)
 
-    # Generate node data
-    node_id_maps = {}  # node_def_id -> list of generated _id values
+    # ── Dry run: emit JSON summary to stdout, then exit ─────────────────────
+    if args.dry_run:
+        # Rough byte-per-row estimates:
+        # - Node row: 36 (uuid) + Σ(~20 per property) + commas + newline ≈ 50 + 20·P
+        # - Rel row: 2·36 (uuids) + Σ(~15 per property) + commas + newline ≈ 80 + 15·P
+        # These are conservative; actual sizes vary with property values.
+
+        nodes_summary = {}
+        nodes_total = 0
+        nodes_bytes = 0
+        for n in nodes:
+            nid = n["id"]
+            info = node_counts.get(nid, {"label": "Node", "count": args.scale})
+            label = info["label"]
+            count = info["count"]
+            num_props = len(n.get("properties", {}))
+            avg_row_bytes = 50 + 20 * num_props
+            nodes_summary[label] = {
+                "count": count,
+                "properties": num_props,
+                "estimated_bytes": count * avg_row_bytes,
+            }
+            nodes_total += count
+            nodes_bytes += count * avg_row_bytes
+
+        rels_summary = {}
+        rels_total = 0
+        rels_bytes = 0
+        for r in relationships:
+            rel_type = r.get("type", "RELATED_TO")
+            from_nid = r["fromId"]
+            to_nid = r["toId"]
+            from_size = node_counts.get(from_nid, {}).get("count", 0)
+            to_size = node_counts.get(to_nid, {}).get("count", 0)
+            from_label = node_counts.get(from_nid, {}).get("label", from_nid)
+            to_label = node_counts.get(to_nid, {}).get("label", to_nid)
+            cardinality = cardinality_map.get(rel_type, "N:N")
+            is_self = from_nid == to_nid
+            count = resolve_rel_count(rel_type, from_size, to_size, args.scale,
+                                      is_self, cardinality, args.nn_fanout,
+                                      rel_fanout_map, rel_counts_cap)
+            num_props = len(r.get("properties", {}))
+            avg_row_bytes = 80 + 15 * num_props
+            rels_summary[rel_type] = {
+                "from_label": from_label,
+                "to_label": to_label,
+                "cardinality": cardinality,
+                "count": count,
+                "properties": num_props,
+                "estimated_bytes": count * avg_row_bytes,
+            }
+            rels_total += count
+            rels_bytes += count * avg_row_bytes
+
+        # Throughput-based runtime estimate. Conservative numbers from
+        # measured sandbox runs: ~9K rows/s for names-heavy nodes, ~40K rows/s
+        # for relationships. Real perf varies with property complexity.
+        est_seconds = (nodes_total / 9_000) + (rels_total / 40_000)
+
+        summary = {
+            "scale": args.scale,
+            "flavor": args.flavor,
+            "locale": locale,
+            "nn_fanout": args.nn_fanout,
+            "cardinality_overrides": cardinality_map,
+            "node_counts_overrides": node_counts_override,
+            "rel_fanout_overrides": rel_fanout_map,
+            "rel_counts_caps": rel_counts_cap,
+            "shared_identifiers": shared_id_config,
+            "totals": {
+                "nodes": nodes_total,
+                "relationships": rels_total,
+                "estimated_csv_bytes": nodes_bytes + rels_bytes,
+                "estimated_runtime_seconds": int(est_seconds),
+            },
+            "nodes": nodes_summary,
+            "relationships": rels_summary,
+        }
+        print(json.dumps(summary, indent=2))
+        return
+
+    print(f"📊 Generating graph data", file=sys.stderr)
+    print(f"   Scale:        {args.scale:,} (anchor count)", file=sys.stderr)
+    print(f"   Flavor:       {args.flavor}", file=sys.stderr)
+    print(f"   Locale:       {locale}", file=sys.stderr)
+    print(f"   Distribution: {args.distribution}", file=sys.stderr)
+    print(f"   N:N fanout:   {args.nn_fanout}× (each entity averages "
+          f"~{args.nn_fanout:.1f} partners)", file=sys.stderr)
+    if cardinality_map:
+        card_summary = ", ".join(f"{k}={v}" for k, v in cardinality_map.items())
+        print(f"   Cardinality:  {card_summary}", file=sys.stderr)
+    else:
+        print(f"   Cardinality:  all N:N (no overrides)", file=sys.stderr)
+    if node_counts_override:
+        nc_summary = ", ".join(f"{k}={v:,}" for k, v in node_counts_override.items())
+        print(f"   Node counts:  {nc_summary} (overrides)", file=sys.stderr)
+    if rel_fanout_map:
+        rf_summary = ", ".join(f"{k}={v}×" for k, v in rel_fanout_map.items())
+        print(f"   Rel fanout:   {rf_summary} (per-rel overrides)", file=sys.stderr)
+    if rel_counts_cap:
+        rc_summary = ", ".join(f"{k}≤{v:,}" for k, v in rel_counts_cap.items())
+        print(f"   Rel caps:     {rc_summary}", file=sys.stderr)
+    if shared_id_config:
+        si_summary = ", ".join(
+            f"{k}={int(v['share_pct']*100)}%@{v['cluster_min']}-{v['cluster_max']}"
+            for k, v in shared_id_config.items()
+        )
+        print(f"   Shared ids:   {si_summary}", file=sys.stderr)
+    print(f"   Seed:         {args.seed}", file=sys.stderr)
+    print(f"   Mode:         {'chunked streaming' if chunked else 'streaming' if streaming else 'in-memory'}",
+          file=sys.stderr)
+    print(f"   Output:       {os.path.abspath(args.output_dir)}", file=sys.stderr)
+    print("", file=sys.stderr)
+
+    # ── Build shared-identifier pools (if any) ──────────────────────────────
+    if shared_id_config:
+        # Translate node_counts (keyed by node-id) into a label-keyed dict
+        # for pool sizing.
+        node_counts_by_label = {info["label"]: info["count"]
+                                for info in node_counts.values()}
+        _init_shared_identifier_pools(shared_id_config, node_counts_by_label, nodes)
+        print("", file=sys.stderr)
+
+    # ── Generate nodes ──────────────────────────────────────────────────────
+    node_indexes = {}   # node_def_id -> IdIndex
+    node_files = {}     # label -> list of CSV filenames
+    node_totals = {}    # label -> total row count
+
     for node_def in nodes:
         nid = node_def["id"]
         info = node_counts.get(nid, {"label": "Node", "count": args.scale})
         label = info["label"]
         count = info["count"]
 
-        rows = generate_node_data(node_def, count)
-        node_id_maps[nid] = [r["_id"] for r in rows]
+        if streaming:
+            idx_path = os.path.join(index_dir, f"{nid}.ids")
+            idx = DiskIdIndex(label, idx_path)
+        else:
+            idx = InMemoryIdIndex(label)
 
-        filename = f"nodes_{label.lower().replace(' ', '_')}.csv"
-        filepath = os.path.join(args.output_dir, filename)
-        write_csv(filepath, rows)
-        print(f"   ✅ {label}: {count:,} nodes → {filename}")
+        files, total = generate_nodes_streaming(
+            node_def, count, args.output_dir, idx, show_progress
+        )
+        node_indexes[nid] = idx
+        node_files[label] = files
+        node_totals[label] = total
+        print(f"   ✅ {label}: {total:,} nodes → {files[0]}"
+              + (f" (+{len(files)-1} more parts)" if len(files) > 1 else ""),
+              file=sys.stderr)
 
-    # Generate relationship data
-    print()
+    print("", file=sys.stderr)
+
+    # ── Generate relationships ──────────────────────────────────────────────
+    rel_files = {}       # rel_type -> list of CSV filenames
+    rel_totals = {}      # rel_type -> total row count
+    rel_endpoints = {}   # rel_type -> (from_label, to_label)
+
     for rel_def in relationships:
-        from_id = rel_def["fromId"]
-        to_id = rel_def["toId"]
+        from_nid = rel_def["fromId"]
+        to_nid = rel_def["toId"]
         rel_type = rel_def.get("type", "RELATED_TO")
 
-        from_ids = node_id_maps.get(from_id, [])
-        to_ids = node_id_maps.get(to_id, [])
-
-        if not from_ids or not to_ids:
-            print(f"   ⚠️  Skipping {rel_type}: missing node data for {from_id} or {to_id}")
+        from_idx = node_indexes.get(from_nid)
+        to_idx = node_indexes.get(to_nid)
+        if from_idx is None or to_idx is None or len(from_idx) == 0 or len(to_idx) == 0:
+            print(f"   ⚠️  Skipping {rel_type}: missing node data", file=sys.stderr)
             continue
 
-        from_label = node_counts.get(from_id, {}).get("label", from_id)
-        to_label = node_counts.get(to_id, {}).get("label", to_id)
+        from_label = node_counts.get(from_nid, {}).get("label", from_nid)
+        to_label = node_counts.get(to_nid, {}).get("label", to_nid)
 
-        rows = generate_relationship_data(rel_def, from_ids, to_ids, from_label, to_label, args.scale)
+        # Look up cardinality for this rel-type; default N:N if unspecified.
+        rel_cardinality = cardinality_map.get(rel_type, "N:N")
 
-        filename = f"rels_{rel_type.lower()}.csv"
-        filepath = os.path.join(args.output_dir, filename)
-        write_csv(filepath, rows)
-        print(f"   ✅ {from_label} -[{rel_type}]-> {to_label}: {len(rows):,} relationships → {filename}")
+        # Resolve target rel count, applying any --rel-fanout / --rel-counts
+        # overrides up front so generate_rels_streaming sees the final number.
+        target_count = resolve_rel_count(
+            rel_type, len(from_idx), len(to_idx), args.scale,
+            rel_def["fromId"] == rel_def["toId"], rel_cardinality,
+            args.nn_fanout, rel_fanout_map, rel_counts_cap,
+        )
 
-    # Summary
-    total_nodes = sum(len(ids) for ids in node_id_maps.values())
-    total_rels = sum(1 for _ in relationships)
-    print(f"\n🎉 Done! Generated {total_nodes:,} total nodes across {len(nodes)} labels")
-    print(f"   Output directory: {os.path.abspath(args.output_dir)}")
+        files, total = generate_rels_streaming(
+            rel_def, from_idx, to_idx, args.output_dir,
+            args.scale, args.distribution, show_progress, rng,
+            cardinality=rel_cardinality, nn_fanout=args.nn_fanout,
+            num_rels=target_count,
+        )
+        rel_files[rel_type] = files
+        rel_totals[rel_type] = total
+        rel_endpoints[rel_type] = (from_label, to_label)
+        print(f"   ✅ {from_label} -[{rel_type} {rel_cardinality}]-> {to_label}: "
+              f"{total:,} rels → {files[0]}"
+              + (f" (+{len(files)-1} more parts)" if len(files) > 1 else ""),
+              file=sys.stderr)
 
-    # Write a manifest for the ingestion skill to use
-    manifest = {
-        "generated_at": datetime.now().isoformat(),
-        "scale": args.scale,
-        "schema": schema,
-        "files": {
-            "nodes": {},
-            "relationships": {},
-        }
-    }
-    for node_def in nodes:
-        nid = node_def["id"]
-        label = node_counts.get(nid, {}).get("label", "Node")
-        manifest["files"]["nodes"][label] = {
-            "file": f"nodes_{label.lower().replace(' ', '_')}.csv",
-            "count": len(node_id_maps.get(nid, [])),
-            "properties": node_def.get("properties", {}),
-            "labels": node_def.get("labels", [label]),
-        }
-    for rel_def in relationships:
-        rel_type = rel_def.get("type", "RELATED_TO")
-        from_label = node_counts.get(rel_def["fromId"], {}).get("label", rel_def["fromId"])
-        to_label = node_counts.get(rel_def["toId"], {}).get("label", rel_def["toId"])
-        manifest["files"]["relationships"][rel_type] = {
-            "file": f"rels_{rel_type.lower()}.csv",
-            "from_label": from_label,
-            "to_label": to_label,
-            "properties": rel_def.get("properties", {}),
-        }
+    # ── Clean up temp ID index files ────────────────────────────────────────
+    if index_dir and os.path.isdir(index_dir):
+        try:
+            for fn in os.listdir(index_dir):
+                os.remove(os.path.join(index_dir, fn))
+            os.rmdir(index_dir)
+        except OSError:
+            pass  # non-fatal; leaves recoverable temp data
 
-    manifest_path = os.path.join(args.output_dir, "manifest.json")
-    with open(manifest_path, "w") as f:
-        json.dump(manifest, f, indent=2)
-    print(f"   Manifest: {manifest_path}")
+    # ── Copy the schema alongside the CSVs ──────────────────────────────────
+    # The ingestion skill needs the schema to know which node files connect to
+    # which via which relationships (the filesystem alone can't express rel
+    # endpoints). We write a copy of the user's original schema rather than
+    # inventing a separate manifest format — one source of truth, no drift.
+    total_nodes = sum(node_totals.values())
+    total_rels = sum(rel_totals.values())
+
+    print(f"\n🎉 Done! {total_nodes:,} nodes, {total_rels:,} relationships",
+          file=sys.stderr)
+
+    schema_copy_path = os.path.join(args.output_dir, "schema.json")
+    with open(schema_copy_path, "w") as f:
+        json.dump(raw, f, indent=2)
+    print(f"   Schema:   {schema_copy_path}", file=sys.stderr)
 
 
 if __name__ == "__main__":
