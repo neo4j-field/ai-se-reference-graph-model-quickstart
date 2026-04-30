@@ -65,8 +65,19 @@ If the user says "skip" or "I don't know": generate a specific, framed question 
 
 ## Step 3: Render the Board
 
-After each column's answers, substitute `{{BOARD_DATA_JSON}}` in `assets/board-template.jsx`
-and output as an HTML artifact. Each render replaces the previous one — the board grows left to right.
+After each column's answers, output the board as a `text/html` artifact. To do this:
+
+1. Copy the full source of `assets/board-template.jsx` exactly, character for character.
+2. Find the single line that begins `const BOARD_DATA =` and ends `/* REPLACE_THIS_LINE */`.
+   Replace that **entire line** (nothing else) with:
+   ```
+   const BOARD_DATA = <BOARD_DATA_JSON>;
+   ```
+   where `<BOARD_DATA_JSON>` is the full, compact, single-line JSON object for the current board state (all columns answered so far).
+3. Output the result as a `text/html` artifact — title: `[Customer] — UC Value Workshop`.
+4. Do NOT output any text before or after the artifact. The artifact IS the response for that turn.
+
+Each render replaces the previous one — the board grows left to right.
 
 **Card body rules:**
 - Known value → body text, semantic color per table above
