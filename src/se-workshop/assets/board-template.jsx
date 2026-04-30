@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- Substitute {{BOARD_DATA_JSON}} with the board data object before rendering. -->
+<!-- When rendering: replace the entire `const BOARD_DATA = {...};` line with the filled board data. -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -228,7 +228,7 @@ body {
 </div>
 
 <script>
-const BOARD_DATA = {{BOARD_DATA_JSON}};
+const BOARD_DATA = {"meta":{"customer":"","useCase":"","date":"","status":"Draft"},"columns":[],"challenger":{"sections":[{"id":"weak","label":"🟥 Weak Points","color":"red","items":[]},{"id":"missing","label":"🟧 Missing","color":"orange","items":[]},{"id":"questions","label":"🟨 Questions for Customer","color":"yellow","items":[]},{"id":"framing","label":"🟦 Stronger Framing","color":"blue","items":[]}]}}; /* REPLACE_THIS_LINE */
 
 const S = {
   meta:      { ...BOARD_DATA.meta },

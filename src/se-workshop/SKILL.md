@@ -22,15 +22,14 @@ Generate all questions from the specific use case and industry — never generic
 Never be a passive note-taker.
 
 ## Rules
-1. **Always render the board as a `text/html` artifact after every column. Never skip. Never use a code block.**
-2. No fabrication. Unknown → `null` card. Gap/skip → orange card with a specific "ask customer" question.
-3. One column at a time. Max 2 questions before rendering. Render. Then move on.
-4. c12 (Graph Advantage) and c13 (AI Opportunity) always populated from Neo4j domain expertise — never null.
-5. "Skip" or "don't know" → generate a targeted, use-case-specific facilitation question → mark card orange.
-6. Challenger: one sharp insight per column inline — not a block at the end.
-7. After the final column: inline markdown facilitation guide (not a second artifact).
-8. Never ask for information already in the conversation.
-9. **All questions must use `AskUserQuestion` in checkbox format.** Never ask questions inline in chat. Never use free-text input. Always generate 4–6 relevant options (tailored to the use case and industry) plus a final "Other / add context" option so the user can select one or more answers.
+1. No fabrication. Unknown → `null` card. Gap/skip → orange card with a specific "ask customer" question.
+2. One column at a time. Max 2 questions before rendering. Render. Then move on.
+3. c12 (Graph Advantage) and c13 (AI Opportunity) always populated from Neo4j domain expertise — never null.
+4. "Skip" or "don't know" → generate a targeted, use-case-specific facilitation question → mark card orange.
+5. Challenger: one sharp insight per column inline — not a block at the end.
+6. After the final column: inline markdown facilitation guide (not a second artifact).
+7. Never ask for information already in the conversation.
+8. **All questions must use `AskUserQuestion` in checkbox format.** Never ask questions inline in chat. Never use free-text input. Always generate 4–6 relevant options (tailored to the use case and industry) plus a final "Other / add context" option so the user can select one or more answers.
 
 ## Step 1: Mode
 
@@ -66,12 +65,19 @@ If the user says "skip" or "I don't know": generate a specific, framed question 
 
 ## Step 3: Render the Board
 
-After each column's answers:
-1. Take the full HTML from `assets/board-template.jsx`
-2. Replace the literal string `{{BOARD_DATA_JSON}}` with the JSON object (no quotes around it)
-3. Output the result as a **rendered HTML artifact** — not a code block, not inline text. Use artifact type `text/html`. Title: `[Customer] — UC Value Workshop`.
+After each column's answers, output the board as a `text/html` artifact. To do this:
 
-Each render replaces the previous artifact. The board grows left to right as columns are completed.
+1. Copy the full source of `assets/board-template.jsx` exactly, character for character.
+2. Find the single line that begins `const BOARD_DATA =` and ends `/* REPLACE_THIS_LINE */`.
+   Replace that **entire line** (nothing else) with:
+   ```
+   const BOARD_DATA = <BOARD_DATA_JSON>;
+   ```
+   where `<BOARD_DATA_JSON>` is the full, compact, single-line JSON object for the current board state (all columns answered so far).
+3. Output the result as a `text/html` artifact — title: `[Customer] — UC Value Workshop`.
+4. Do NOT output any text before or after the artifact. The artifact IS the response for that turn.
+
+Each render replaces the previous one — the board grows left to right.
 
 **Card body rules:**
 - Known value → body text, semantic color per table above
