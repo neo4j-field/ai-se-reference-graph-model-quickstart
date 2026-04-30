@@ -6,6 +6,7 @@
 [![Claude](https://img.shields.io/badge/Claude-Skills-D97706?logo=anthropic&logoColor=white)](https://claude.ai/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Models](https://img.shields.io/badge/Reference_Models-25-blue)](#available-reference-models)
+[![SE Skills](https://img.shields.io/badge/SE_Skills-3-purple)](#se-skills-for-solutions-engineers)
 
 ---
 
@@ -18,6 +19,7 @@
 - [The Pipeline](#the-pipeline)
 - [Available Reference Models](#available-reference-models)
 - [Sample Workflows](#sample-workflows)
+- [SE Skills for Solutions Engineers](#se-skills-for-solutions-engineers)
 - [Skill Architecture](#skill-architecture)
 - [Adding Custom Models](#adding-custom-models)
 - [Troubleshooting](#troubleshooting)
@@ -37,6 +39,7 @@ Pick a reference model → Customize in visual editor → Generate test data →
 **Key features:**
 
 - **25 industry reference models** from [Neo4j's official use-case documentation](https://neo4j.com/developer/industry-use-cases/) covering Financial Services, Insurance, Healthcare, Manufacturing, and Cybersecurity
+- **3 SE workflow skills** — use-case discovery workshop, business case / ROI snapshot, and POC plan, each producing a slide-ready HTML artifact for customer conversations
 - **Interactive visual schema editor** — drag-and-drop nodes and relationships, edit properties, export as arrows.app JSON or Cypher
 - **Context-aware data generation** — a `name` on a `Drug` node produces "Metformin", not "John Smith"
 - **One-command Neo4j ingestion** — via MCP tools or a standalone Python script
@@ -64,13 +67,20 @@ For direct database ingestion from Claude, connect the [Neo4j MCP tools](https:/
 
 Download all 5 `.skill` files from the [`skills/`](skills/) directory:
 
-| File | Size | Purpose |
-|---|---|---|
-| `graph-schema-editor.skill` | ~12 KB | Interactive visual graph schema editor |
-| `graph-reference-models.skill` | ~33 KB | 25 Neo4j industry reference data models |
-| `graph-schema-from-reference.skill` | ~33 KB | Pipeline orchestrator + inject script |
-| `graph-data-generator.skill` | ~15 KB | Context-aware fake data generation |
-| `graph-neo4j-ingestion.skill` | ~6 KB | Database loading (MCP or Python script) |
+**Graph schema pipeline:**
+
+| File | Purpose |
+|---|---|
+| `graph-schema-studio.skill` | Interactive visual editor + 25 industry reference models |
+| `graph-data-workflow.skill` | 6-step conversational flow for generating synthetic data |
+
+**SE workflow:**
+
+| File | Purpose |
+|---|---|
+| `se-workshop.skill` | Progressive use-case discovery board (column-by-column facilitation) |
+| `se-value-case.skill` | Business case + ROI snapshot artifact |
+| `se-poc-doc.skill` | POC plan + executive summary artifact |
 
 ### Step 2: Install in Claude
 
@@ -341,6 +351,98 @@ Claude: [Creates a custom schema from scratch using the editor]
 
 ---
 
+## SE Skills for Solutions Engineers
+
+Three skills designed for SE/AE customer conversations. They work independently or chained together — workshop output feeds naturally into the value case, which feeds into the POC doc.
+
+```
+se-workshop  →  se-value-case  →  se-poc-doc
+(discovery)     (business case)   (POC plan)
+```
+
+### `se-workshop` — Use Case Value Workshop
+
+A progressive discovery board built column-by-column. Claude acts as a senior SE + Challenger, asking one column at a time and pushing back on vague answers.
+
+**Trigger phrases:** "workshop", "value workshop", "use case workshop", "discovery session", "prepare for customer", "ROI for Neo4j", "help me build the business case"
+
+**What it produces:** A rendered HTML board with 6 columns — Business Scope, Current Business Landscape, Current Technical Landscape, Technical Scope, Stakeholders, and Success Metrics. Gaps become orange cards with specific facilitation questions to ask the customer.
+
+**Two modes:**
+- **Prep** — solo, up to 2 follow-up questions per column, Challenger pushes on vague answers
+- **Live** — customer present, one question per column, render immediately
+
+```
+You: "Let's run a workshop for a fraud detection use case at a tier-1 bank"
+
+Claude: [Asks mode: Prep or Live]
+You:    "Prep"
+Claude: [Asks about business scope — checkbox with 4–6 options]
+You:    [Selects answers]
+Claude: [Renders column 1, gives one Challenger insight, moves to column 2]
+...
+Claude: [Completes all 6 columns + inline facilitation guide]
+```
+
+---
+
+### `se-value-case` — Business Case & ROI
+
+Reads from the current conversation (se-workshop output or direct input). Asks only for what is genuinely missing — never invents numbers.
+
+**Trigger phrases:** "business case", "ROI", "value narrative", "value case", "cost of inaction", "quantify the value", "build the business case", "what's the ROI"
+
+**What it produces:** A single-page dark-theme HTML artifact with two sections:
+1. **Business Case** — executive narrative, problem statement, cost of inaction, value drivers, quantified impact (ranges if data exists)
+2. **ROI Snapshot** — four metric tiles (time saved, cost avoided, revenue impact, risk reduction)
+
+All numbers are labelled as estimates. Gaps are marked `[ ? ]` with a note on what to ask the customer.
+
+```
+You: "Build the business case based on what we just covered"
+
+Claude: [Reads workshop output, asks at most 3 targeted questions for missing numbers]
+You:    [Provides baseline metrics]
+Claude: [Renders single-page HTML artifact — slide-ready]
+```
+
+---
+
+### `se-poc-doc` — POC Plan & Executive Summary
+
+Reads from the current conversation. Produces a two-section HTML artifact: a structured POC plan and a slide-ready one-pager executive summary. Designed to prove a buying decision, not technology.
+
+**Trigger phrases:** "POC", "PoC plan", "proof of concept", "exec summary", "executive summary", "POV plan", "proof of value", "next steps document", "send to customer", "build the POC"
+
+**What it produces:** A single-page HTML artifact with two sections:
+1. **POC Plan** — objective, hypotheses, scope, data required, success criteria (binary, flagged if vague), timeline, customer commitments, exit criteria
+2. **Executive Summary** — C-level one-pager designed to be screenshot directly into a slide deck
+
+```
+You: "Now build the POC doc"
+
+Claude: [Reads conversation for buying decision + success criteria, asks at most 2 questions]
+You:    [Answers]
+Claude: [Renders POC plan + exec summary in one artifact]
+```
+
+---
+
+### Chained Workflow Example
+
+```
+You:    "Let's run a workshop for a supply chain risk use case"
+Claude: [se-workshop: 6-column discovery board]
+
+You:    "Build the business case from this"
+Claude: [se-value-case: business case + ROI artifact]
+
+You:    "Now write up the POC plan"
+Claude: [se-poc-doc: POC plan + exec summary artifact]
+```
+
+---
+
 ## Skill Architecture
 
 ```
@@ -349,35 +451,31 @@ neo4j-graph-schema-toolkit/
 ├── README.md
 ├── LICENSE
 │
-├── skills/
-│   ├── graph-schema-editor.skill          ← Interactive visual editor (JSX)
-│   ├── graph-reference-models.skill       ← 25 reference model JSONs
-│   ├── graph-schema-from-reference.skill  ← Pipeline orchestrator
-│   ├── graph-data-generator.skill         ← Context-aware Faker generator
-│   └── graph-neo4j-ingestion.skill        ← Neo4j loader (MCP + Python)
+├── skills/                              ← deployable .skill files (ZIP)
+│   ├── graph-schema-studio.skill        ← Visual editor + 25 reference models
+│   ├── graph-data-workflow.skill        ← 6-step synthetic data generation
+│   ├── se-workshop.skill                ← Use case discovery board
+│   ├── se-value-case.skill              ← Business case + ROI artifact
+│   └── se-poc-doc.skill                 ← POC plan + exec summary artifact
 │
 └── src/
-    ├── graph-schema-editor/
+    ├── graph-data-workflow/
     │   ├── SKILL.md
-    │   └── assets/graph-editor-template.jsx
-    │
-    ├── graph-reference-models/
-    │   ├── SKILL.md
-    │   ├── scripts/inject_model.py
-    │   └── references/               ← 25 JSON model files + index
-    │
-    ├── graph-schema-from-reference/
-    │   ├── SKILL.md                   ← Pipeline orchestrator (Stages 1-6)
-    │   ├── scripts/inject_model.py
-    │   └── references/               ← 25 JSON model files + index
+    │   ├── assets/                      ← Faker generator scripts
+    │   └── scripts/
     │
     ├── graph-data-generator/
     │   ├── SKILL.md
     │   └── assets/generate_data.py
     │
-    └── graph-neo4j-ingestion/
-        ├── SKILL.md
-        └── assets/ingest_data.py
+    ├── se-workshop/
+    │   └── SKILL.md                     ← Discovery board + facilitation rules
+    │
+    ├── se-value-case/
+    │   └── SKILL.md                     ← Business case + ROI generation rules
+    │
+    └── se-poc-doc/
+        └── SKILL.md                     ← POC plan + exec summary rules
 ```
 
 ---
